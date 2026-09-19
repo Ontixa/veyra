@@ -18,3 +18,9 @@ dist/
 .env.*
 !.env.example
 apps/desktop/src-tauri/gen/
+
+# AI assistant artifacts
+.devin/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+NUL
