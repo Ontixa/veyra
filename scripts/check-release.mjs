@@ -100,13 +100,13 @@ check(
 );
 check(
   changelog.includes(
-    `[Unreleased]: https://github.com/tang-vu/veyra/compare/${tag}...HEAD`,
+    `[Unreleased]: https://github.com/Ontixa/veyra/compare/${tag}...HEAD`,
   ),
   `CHANGELOG.md must compare Unreleased changes from ${tag}`,
 );
 check(
   changelog.includes(
-    `[${version}]: https://github.com/tang-vu/veyra/releases/tag/${tag}`,
+    `[${version}]: https://github.com/Ontixa/veyra/releases/tag/${tag}`,
   ),
   `CHANGELOG.md must link ${version} to its immutable GitHub Release`,
 );
@@ -147,13 +147,13 @@ if (existsSync(repositoryPath(releaseNotesPath))) {
     : [
         [
           "threat model",
-          `https://github.com/tang-vu/veyra/blob/${tag}/docs/security/threat-model.md`,
+          `https://github.com/Ontixa/veyra/blob/${tag}/docs/security/threat-model.md`,
         ],
         [
           "changelog",
-          `https://github.com/tang-vu/veyra/blob/${tag}/CHANGELOG.md`,
+          `https://github.com/Ontixa/veyra/blob/${tag}/CHANGELOG.md`,
         ],
-        ["roadmap", `https://github.com/tang-vu/veyra/blob/${tag}/ROADMAP.md`],
+        ["roadmap", `https://github.com/Ontixa/veyra/blob/${tag}/ROADMAP.md`],
       ];
   for (const [label, link] of documentationLinks) {
     check(
@@ -166,7 +166,7 @@ if (existsSync(repositoryPath(releaseNotesPath))) {
     "## Verify the download",
     "## Security and trust boundary",
     "unsigned",
-    "https://github.com/tang-vu/veyra/issues/4",
+    "https://github.com/Ontixa/veyra/issues/4",
     "gh attestation verify",
   ];
   if (!allowRecovery) {

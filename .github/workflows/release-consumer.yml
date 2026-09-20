@@ -105,11 +105,21 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.resolve-release.outputs.source_commit }}
-        run: node scripts/verify-release-assets.mjs "$RELEASE_TAG" dist "$GITHUB_REPOSITORY" "$SOURCE_COMMIT"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # v0.1.0 predates the repository transfer to the Ontixa organization; its
+          # immutable manifest records the original tang-vu/veyra repository identity.
+          manifest_repo="$GITHUB_REPOSITORY"
+          if [[ "$RELEASE_TAG" == "v0.1.0" ]]; then
+            manifest_repo="tang-vu/veyra"
+          fi
+          node scripts/verify-release-assets.mjs "$RELEASE_TAG" dist "$manifest_repo" "$SOURCE_COMMIT"
 
       - name: Verify build provenance and exact signer workflow
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -122,10 +132,18 @@ jobs:
             dist/*.release-manifest.json
           )
           (( ${#attested[@]} >= 5 ))
+          # v0.1.0 attestations live under the pre-transfer signing account, not the
+          # repository attestation store.
+          attestation_scope=(--repo "$GITHUB_REPOSITORY")
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          if [[ "$RELEASE_TAG" == "v0.1.0" ]]; then
+            attestation_scope=(--owner tang-vu)
+            signer_workflow="tang-vu/veyra/.github/workflows/release.yml"
+          fi
           for artifact in "${attested[@]}"; do
             gh attestation verify "$artifact" \
-              --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              "${attestation_scope[@]}" \
+              --signer-workflow "$signer_workflow" \
               --deny-self-hosted-runners
           done
 

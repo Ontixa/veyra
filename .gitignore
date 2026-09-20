@@ -18,3 +18,4 @@ dist/
 .env.*
 !.env.example
 apps/desktop/src-tauri/gen/
+ruleset-snapshot-*.json

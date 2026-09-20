@@ -13,7 +13,7 @@ import {
   validateArtifactSbom,
 } from "./check-artifact-sbom.mjs";
 
-const canonicalRepository = "tang-vu/veyra";
+const canonicalRepository = "Ontixa/veyra";
 
 const artifactSboms = [
   {

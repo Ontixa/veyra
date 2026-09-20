@@ -4,14 +4,14 @@
   "private": false,
   "description": "Generated JSON Schema and compatibility fixtures for Veyra protocol v1",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/tang-vu/veyra/tree/main/packages/protocol-schema#readme",
+  "homepage": "https://github.com/Ontixa/veyra/tree/main/packages/protocol-schema#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tang-vu/veyra.git",
+    "url": "git+https://github.com/Ontixa/veyra.git",
     "directory": "packages/protocol-schema"
   },
   "bugs": {
-    "url": "https://github.com/tang-vu/veyra/issues"
+    "url": "https://github.com/Ontixa/veyra/issues"
   },
   "keywords": [
     "veyra",

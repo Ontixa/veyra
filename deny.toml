@@ -10,7 +10,7 @@ targets = [
 unmaintained = "workspace"
 unsound = "all"
 ignore = [
-  { id = "RUSTSEC-2024-0429", reason = "Tauri 2.11 transitively pins glib 0.18 on Linux; the affected VariantStrIter API is unused, Linux desktop artifacts are not released, and removal is tracked in https://github.com/tang-vu/veyra/issues/4" },
+  { id = "RUSTSEC-2024-0429", reason = "Tauri 2.11 transitively pins glib 0.18 on Linux; the affected VariantStrIter API is unused, Linux desktop artifacts are not released, and removal is tracked in https://github.com/Ontixa/veyra/issues/4" },
 ]
 
 [bans]
