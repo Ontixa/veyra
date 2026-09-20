@@ -57,6 +57,77 @@ function request(path, { json = true } = {}) {
   }
 }
 
+// Paginated list fetch: `gh api --paginate -q '.[]'` emits one JSON value
+// per line across every page.
+function requestAll(path) {
+  const result = spawnSync(
+    "gh",
+    [
+      "api",
+      "--paginate",
+      "-q",
+      ".[]",
+      path,
+      "-H",
+      "Accept: application/vnd.github+json",
+      "-H",
+      `X-GitHub-Api-Version: ${apiVersion}`,
+    ],
+    { encoding: "utf8" },
+  );
+  const detail = (
+    result.stderr ||
+    result.error?.message ||
+    "unknown GitHub CLI error"
+  ).trim();
+  check(
+    result.status === 0,
+    `GitHub API request failed for ${path}: ${detail}`,
+  );
+  if (result.status !== 0) {
+    return undefined;
+  }
+  try {
+    return result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch (error) {
+    check(
+      false,
+      `GitHub API returned invalid JSON for ${path}: ${error.message}`,
+    );
+    return undefined;
+  }
+}
+
+// Read that may legitimately fail (e.g. org-level detail needing a scope
+// the token lacks). Returns undefined without recording a failure so the
+// caller can mark the item UNKNOWN instead of pretending it is absent.
+function requestOptional(path) {
+  const result = spawnSync(
+    "gh",
+    [
+      "api",
+      path,
+      "-H",
+      "Accept: application/vnd.github+json",
+      "-H",
+      `X-GitHub-Api-Version: ${apiVersion}`,
+    ],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    return undefined;
+  }
+}
+
 function sameMembers(actual, expected) {
   return (
     Array.isArray(actual) &&
@@ -177,18 +248,35 @@ check(
   "future GitHub Releases must be immutable",
 );
 
-const summaries = request(
-  `repos/${repository}/rulesets?includes_parents=false`,
+// includes_parents surfaces rulesets from Organization or higher sources
+// that also apply to this repo. Repository-source entries get full detail
+// via the repo endpoint; parent entries keep their summary and an optional
+// org-endpoint detail (unreadable parents stay UNKNOWN in the evaluator,
+// never an implied absence).
+const summaries = requestAll(
+  `repos/${repository}/rulesets?includes_parents=true&per_page=100`,
 );
 const rulesets = [];
+const inherited = [];
 const failedRulesetNames = [];
 if (Array.isArray(summaries)) {
+  const owner = repository.split("/")[0];
   for (const summary of summaries) {
-    const detail = request(`repos/${repository}/rulesets/${summary.id}`);
-    if (detail) {
-      rulesets.push(detail);
+    const sourceType = summary?.source_type ?? "Repository";
+    if (sourceType === "Repository") {
+      const detail = request(`repos/${repository}/rulesets/${summary.id}`);
+      if (detail) {
+        detail.source_type ??= sourceType;
+        rulesets.push(detail);
+      } else {
+        failedRulesetNames.push(summary.name);
+      }
     } else {
-      failedRulesetNames.push(summary.name);
+      const detail =
+        sourceType === "Organization"
+          ? requestOptional(`orgs/${owner}/rulesets/${summary.id}`)
+          : undefined;
+      inherited.push({ ...summary, source_type: sourceType, detail });
     }
   }
 }
@@ -281,6 +369,7 @@ check(
 const releaseActor = request(`users/${releaseActorLogin}`);
 const tagResult = evaluateTagRulesets({
   rulesets,
+  inherited,
   releaseActorId: releaseActor?.id,
   releaseActorLogin,
   failedRulesetNames,

@@ -206,3 +206,185 @@ test("failed ruleset detail fetch is UNKNOWN, not 'missing'", () => {
   );
   assert.ok(unknowns.some((u) => u.includes(PROTECT_TAGS_NAME)));
 });
+
+test("include matching but exclude removing all of v* fails", () => {
+  const pt = tagRuleset({
+    conditions: {
+      ref_name: {
+        include: [RELEASE_TAG_PATTERN],
+        exclude: [RELEASE_TAG_PATTERN],
+      },
+    },
+  });
+  const { failures } = evaluateTagRulesets({
+    ...base,
+    rulesets: [pt, creationRuleset()],
+  });
+  assert.ok(failures.some((f) => /empty exclude scope/.test(f)));
+});
+
+test("exclude covering part of v* fails (exclude must be empty)", () => {
+  const pt = tagRuleset({
+    conditions: {
+      ref_name: {
+        include: [RELEASE_TAG_PATTERN],
+        exclude: ["refs/tags/v0.*"],
+      },
+    },
+  });
+  const { failures } = evaluateTagRulesets({
+    ...base,
+    rulesets: [pt, creationRuleset()],
+  });
+  assert.ok(failures.some((f) => /empty exclude scope/.test(f)));
+});
+
+test("include wider than the chosen pattern fails (exact scope required)", () => {
+  for (const include of [
+    ["~ALL"],
+    [RELEASE_TAG_PATTERN, "refs/heads/main"],
+    ["refs/tags/*"],
+  ]) {
+    const rs = creationRuleset({
+      conditions: { ref_name: { include, exclude: [] } },
+    });
+    const { failures } = evaluateTagRulesets({
+      ...base,
+      rulesets: [tagRuleset(), rs],
+    });
+    assert.ok(
+      failures.some((f) => /must cover refs\/tags\/v\* exactly/.test(f)),
+      `expected exact-include failure for ${JSON.stringify(include)}`,
+    );
+  }
+});
+
+test("missing or malformed conditions is UNKNOWN, not a pass or fail", () => {
+  for (const conditions of [
+    undefined,
+    {},
+    { ref_name: {} },
+    { ref_name: { include: RELEASE_TAG_PATTERN, exclude: [] } },
+    { ref_name: { include: [RELEASE_TAG_PATTERN] } },
+  ]) {
+    const pt = tagRuleset({ conditions });
+    const { failures, unknowns } = evaluateTagRulesets({
+      ...base,
+      rulesets: [pt, creationRuleset()],
+    });
+    assert.ok(
+      !failures.some((f) => /include scope|exclude scope/.test(f)),
+      `conditions ${JSON.stringify(conditions)} must not produce scope failures`,
+    );
+    assert.ok(
+      unknowns.some((u) => /ref scope/.test(u)),
+      `conditions ${JSON.stringify(conditions)} must be UNKNOWN`,
+    );
+  }
+});
+
+test("duplicate ruleset name across sources is blocked, not first-match", () => {
+  const { failures } = evaluateTagRulesets({
+    ...base,
+    rulesets: [tagRuleset(), tagRuleset(), creationRuleset()],
+  });
+  assert.ok(failures.some((f) => /ambiguous.*Protect release tags/.test(f)));
+});
+
+test("same-named inherited ruleset creates ambiguity and blocks", () => {
+  const { failures } = evaluateTagRulesets({
+    ...base,
+    inherited: [
+      {
+        id: 900,
+        name: PROTECT_TAG_CREATION_NAME,
+        target: "tag",
+        source_type: "Organization",
+      },
+    ],
+  });
+  assert.ok(
+    failures.some((f) => /ambiguous.*Protect release tag creation/.test(f)),
+  );
+});
+
+test("applicable inherited ruleset governing creation fails", () => {
+  const { failures } = evaluateTagRulesets({
+    ...base,
+    inherited: [
+      {
+        id: 901,
+        name: "Org tag policy",
+        target: "tag",
+        source_type: "Organization",
+        detail: {
+          target: "tag",
+          enforcement: "active",
+          conditions: { ref_name: { include: ["~ALL"], exclude: [] } },
+          rules: [{ type: "creation" }],
+          bypass_actors: [
+            { actor_type: "User", actor_id: 7, bypass_mode: "always" },
+          ],
+        },
+      },
+    ],
+  });
+  assert.ok(failures.some((f) => /also governs release-tag creation/.test(f)));
+});
+
+test("unreadable tag-targeted inherited ruleset is UNKNOWN, not absent", () => {
+  const { failures, unknowns } = evaluateTagRulesets({
+    ...base,
+    inherited: [
+      {
+        id: 902,
+        name: "Org tag policy",
+        target: "tag",
+        source_type: "Organization",
+      },
+    ],
+  });
+  assert.equal(failures.length, 0);
+  assert.ok(unknowns.some((u) => /Org tag policy/.test(u)));
+});
+
+test("non-tag inherited ruleset is ignored", () => {
+  const { failures, unknowns } = evaluateTagRulesets({
+    ...base,
+    inherited: [
+      {
+        id: 903,
+        name: "Org branch policy",
+        target: "branch",
+        source_type: "Organization",
+      },
+    ],
+  });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(unknowns, []);
+});
+
+test("inherited ruleset with readable non-overlapping tag scope is ignored", () => {
+  const { failures, unknowns } = evaluateTagRulesets({
+    ...base,
+    inherited: [
+      {
+        id: 904,
+        name: "Org release-candidate tags",
+        target: "tag",
+        source_type: "Organization",
+        detail: {
+          target: "tag",
+          enforcement: "active",
+          conditions: {
+            ref_name: { include: ["refs/tags/rc-*"], exclude: [] },
+          },
+          rules: [{ type: "creation" }],
+          bypass_actors: [],
+        },
+      },
+    ],
+  });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(unknowns, []);
+});
