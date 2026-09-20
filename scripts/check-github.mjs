@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-const canonicalRepository = "tang-vu/veyra";
+const canonicalRepository = "Ontixa/veyra";
 const repository = process.env.VEYRA_GITHUB_REPOSITORY ?? canonicalRepository;
 const apiVersion = "2026-03-10";
 const failures = [];

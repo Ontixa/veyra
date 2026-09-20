@@ -4,13 +4,13 @@
   "private": true,
   "description": "Reversible execution for AI agents.",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/tang-vu/veyra#readme",
+  "homepage": "https://github.com/Ontixa/veyra#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tang-vu/veyra.git"
+    "url": "git+https://github.com/Ontixa/veyra.git"
   },
   "bugs": {
-    "url": "https://github.com/tang-vu/veyra/issues"
+    "url": "https://github.com/Ontixa/veyra/issues"
   },
   "keywords": [
     "ai-agents",

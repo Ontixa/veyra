@@ -42,15 +42,15 @@ function checkDiscoveryMetadata(manifest, label) {
   );
   check(manifest.license === "Apache-2.0", `${label} must use Apache-2.0`);
   check(
-    repositoryUrl(manifest) === "git+https://github.com/tang-vu/veyra.git",
+    repositoryUrl(manifest) === "git+https://github.com/Ontixa/veyra.git",
     `${label} must point at the canonical repository`,
   );
   check(
-    manifest.homepage?.startsWith("https://github.com/tang-vu/veyra"),
+    manifest.homepage?.startsWith("https://github.com/Ontixa/veyra"),
     `${label} must have a canonical homepage`,
   );
   check(
-    manifest.bugs?.url === "https://github.com/tang-vu/veyra/issues",
+    manifest.bugs?.url === "https://github.com/Ontixa/veyra/issues",
     `${label} must route bugs to the public issue tracker`,
   );
   check(
@@ -150,14 +150,14 @@ check(
 );
 
 const privateAdvisoryUrl =
-  /https:\/\/github\.com\/tang-vu\/veyra\/security\/advisories\/new(?=[\s)'"\]}]|$)/;
+  /https:\/\/github\.com\/Ontixa\/veyra\/security\/advisories\/new(?=[\s)'"\]}]|$)/;
 check(
   privateAdvisoryUrl.test(readText("SECURITY.md")),
   "SECURITY.md must link directly to GitHub private vulnerability reporting",
 );
 
 const advisoryTrackingUrl =
-  /https:\/\/github\.com\/tang-vu\/veyra\/issues\/4(?=[\s)'"\]}]|$)/;
+  /https:\/\/github\.com\/Ontixa\/veyra\/issues\/4(?=[\s)'"\]}]|$)/;
 for (const path of [
   "deny.toml",
   "docs/security/threat-model.md",
@@ -354,7 +354,7 @@ if (cargoMetadata.status === 0) {
     );
     check(manifest.license === "Apache-2.0", `${label} must use Apache-2.0`);
     check(
-      manifest.repository === "https://github.com/tang-vu/veyra",
+      manifest.repository === "https://github.com/Ontixa/veyra",
       `${label} must point at the canonical repository`,
     );
     check(manifest.authors.length > 0, `${label} must identify its authors`);

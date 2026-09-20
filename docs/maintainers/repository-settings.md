@@ -1,7 +1,7 @@
 # Repository settings for maintainers
 
 Files in the repository cannot enforce every GitHub-host setting. An authorized maintainer should
-apply and periodically audit this checklist for the public `tang-vu/veyra` repository. Do not
+apply and periodically audit this checklist for the public `Ontixa/veyra` repository. Do not
 mark an item complete in project evidence until it has been observed on GitHub.
 
 The checked baseline below was observed on 2026-08-24. Run the read-only
@@ -66,7 +66,7 @@ follow-up verification.
 The 2026-08-24 API audit found one direct administrator and no deploy keys, webhooks, environments,
 or secret-scanning alerts. Dependency-graph indexing surfaced one medium transitive `glib 0.18`
 alert that Tauri v2 cannot currently resolve; it remains open and is tracked in
-[issue #4](https://github.com/tang-vu/veyra/issues/4) with explicit exit criteria. The account does
+[issue #4](https://github.com/Ontixa/veyra/issues/4) with explicit exit criteria. The account does
 not expose the organization-only non-provider-pattern and validity-check options; default secret
 scanning and push protection remain enabled. The refreshed Scorecard findings include the tracked
 Tauri GTK3/`glib`/`rust-unic` advisory set and independent approvals, CODEOWNERS review, and last-push

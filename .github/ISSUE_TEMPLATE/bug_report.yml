@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for helping improve Veyra. Do not include API tokens, receipt keys, credentials,
         private journal databases, or third-party data. Security vulnerabilities belong in a
-        [security policy](https://github.com/tang-vu/veyra/security/policy), not here.
+        [security policy](https://github.com/Ontixa/veyra/security/policy), not here.
   - type: checkboxes
     id: preflight
     attributes:

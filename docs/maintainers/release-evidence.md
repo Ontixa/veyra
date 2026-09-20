@@ -53,14 +53,19 @@ from a malicious dependency.
 From a protected-main checkout containing the current verifier:
 
 ```sh
-gh release download vX.Y.Z --repo tang-vu/veyra --dir dist
-node scripts/verify-release-assets.mjs vX.Y.Z dist tang-vu/veyra <annotated-tag-commit>
+gh release download vX.Y.Z --repo Ontixa/veyra --dir dist
+node scripts/verify-release-assets.mjs vX.Y.Z dist Ontixa/veyra <annotated-tag-commit>
 ```
 
 The verifier rejects malformed or partial checksum sets, path-shaped manifest entries, missing or
 orphaned assets, byte-size/digest drift, source/tag mismatch, invalid workflow mode, incomplete
 binary SBOM rollout, and missing Cargo/npm scope. It accepts v0.1.0 as a documented legacy release
 without binary-scoped SBOMs; immutable historical assets are never rewritten to retrofit evidence.
+Because v0.1.0 was published before the repository moved to the `Ontixa` organization, its release
+manifest records `tang-vu/veyra` and its attestations are stored under the `tang-vu` signing
+account: pass `tang-vu/veyra` as the verifier's repository argument and use
+`gh attestation verify --owner tang-vu --signer-workflow tang-vu/veyra/.github/workflows/release.yml`
+for its provenance.
 
 The `Release consumer verification` workflow performs the complete remote check on every newly
 published release, every Monday, and on manual dispatch. It resolves the annotated tag through the

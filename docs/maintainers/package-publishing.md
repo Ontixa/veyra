@@ -14,7 +14,7 @@ operation.
 Run it from protected `main` with:
 
 ```sh
-gh workflow run publish-packages.yml --repo tang-vu/veyra --ref main -f release_tag=vX.Y.Z
+gh workflow run publish-packages.yml --repo Ontixa/veyra --ref main -f release_tag=vX.Y.Z
 ```
 
 The immutable `v0.1.0` release predates the absolute, tag-pinned links now required in copied GitHub
@@ -82,7 +82,7 @@ to the rehearsal until every prerequisite below is observed.
 - Create a GitHub environment such as `package-publishing` only when its deployment policy and
   recovery owners are real. A sole maintainer must not invent a reviewer to simulate separation of
   duties.
-- On each crates.io package, configure GitHub owner `tang-vu`, repository `veyra`, workflow filename
+- On each crates.io package, configure GitHub owner `Ontixa`, repository `veyra`, workflow filename
   `publish-packages.yml`, and the exact environment name if one is used. crates.io requires the crate
   to exist first. Its official authentication Action exchanges GitHub OIDC for a short-lived token.
 - On each npm package, configure the same repository and workflow filename, plus the exact

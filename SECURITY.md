@@ -8,7 +8,7 @@ release. Older snapshots are not supported unless a release note says otherwise.
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected vulnerability. [Report the vulnerability privately through
-GitHub](https://github.com/tang-vu/veyra/security/advisories/new). If that feature is unavailable, use
+GitHub](https://github.com/Ontixa/veyra/security/advisories/new). If that feature is unavailable, use
 a private contact method published by the repository owner and clearly mark the message
 `SECURITY: Veyra`. If no private contact exists, open a detail-free public issue asking for a private
 channel; do not disclose the vulnerability there. Do not include live credentials or third-party

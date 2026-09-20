@@ -4,14 +4,14 @@
   "private": false,
   "description": "Typed client for the authenticated Veyra local API",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/tang-vu/veyra/tree/main/packages/sdk-typescript#readme",
+  "homepage": "https://github.com/Ontixa/veyra/tree/main/packages/sdk-typescript#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tang-vu/veyra.git",
+    "url": "git+https://github.com/Ontixa/veyra.git",
     "directory": "packages/sdk-typescript"
   },
   "bugs": {
-    "url": "https://github.com/tang-vu/veyra/issues"
+    "url": "https://github.com/Ontixa/veyra/issues"
   },
   "keywords": [
     "veyra",

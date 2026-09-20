@@ -96,5 +96,5 @@ Changelog conventions.
 - CodeQL Action components are pinned to one verified upstream release commit and grouped as a
   single Dependabot update so partial version changes cannot break analysis initialization.
 
-[Unreleased]: https://github.com/tang-vu/veyra/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/tang-vu/veyra/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Ontixa/veyra/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ontixa/veyra/releases/tag/v0.1.0

@@ -1,8 +1,8 @@
 # Veyra
 
-[![CI](https://github.com/tang-vu/veyra/actions/workflows/ci.yml/badge.svg)](https://github.com/tang-vu/veyra/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/tang-vu/veyra/actions/workflows/codeql.yml/badge.svg)](https://github.com/tang-vu/veyra/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/tang-vu/veyra/badge)](https://scorecard.dev/viewer/?uri=github.com/tang-vu/veyra)
+[![CI](https://github.com/Ontixa/veyra/actions/workflows/ci.yml/badge.svg)](https://github.com/Ontixa/veyra/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Ontixa/veyra/actions/workflows/codeql.yml/badge.svg)](https://github.com/Ontixa/veyra/actions/workflows/codeql.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Ontixa/veyra/badge)](https://scorecard.dev/viewer/?uri=github.com/Ontixa/veyra)
 
 **Reversible execution for AI agents.**
 
@@ -65,19 +65,26 @@ Prerequisites:
 
 ### Download a verified release
 
-The [v0.1.0 release](https://github.com/tang-vu/veyra/releases/tag/v0.1.0) provides Linux and Windows
+The [v0.1.0 release](https://github.com/Ontixa/veyra/releases/tag/v0.1.0) provides Linux and Windows
 CLI/daemon archives plus an unsigned Windows desktop installer. Each binary artifact has a SHA-256
 checksum and a GitHub build-provenance attestation; the release also includes a Syft-generated,
 attested SPDX 2.3 repository dependency snapshot and an attested release manifest binding asset
 digests to the source-tag and release-control commits. Verify downloads before execution:
 
 ```sh
-gh release download v0.1.0 --repo tang-vu/veyra --dir dist
+gh release download v0.1.0 --repo Ontixa/veyra --dir dist
 cd dist
 for checksum in *.sha256; do sha256sum --check "$checksum"; done
-gh attestation verify ./veyra-linux-x86_64.tar.gz --repo tang-vu/veyra
-gh attestation verify ./veyra-v0.1.0.release-manifest.json --repo tang-vu/veyra
+gh attestation verify ./veyra-linux-x86_64.tar.gz --owner tang-vu \
+  --signer-workflow tang-vu/veyra/.github/workflows/release.yml
+gh attestation verify ./veyra-v0.1.0.release-manifest.json --owner tang-vu \
+  --signer-workflow tang-vu/veyra/.github/workflows/release.yml
 ```
+
+The repository moved to the `Ontixa` organization after v0.1.0 was published. Downloads come from
+`Ontixa/veyra`, but the release's immutable manifest records `tang-vu/veyra` and its provenance
+attestations remain under the `tang-vu` signing account, so verify them with `--owner tang-vu`
+against the pre-transfer signer workflow above.
 
 See the [release notes](docs/releases/v0.1.0.md) for artifact scope, Windows verification, and known
 security limitations. The installer is not platform-signed; checksums and provenance do not replace
@@ -91,7 +98,7 @@ v0.1.0 assets.
 Run the complete deterministic flow—no API key or paid service is used:
 
 ```sh
-git clone https://github.com/tang-vu/veyra.git
+git clone https://github.com/Ontixa/veyra.git
 cd veyra
 cargo run --locked -p veyra-cli -- demo --json
 ```
@@ -231,7 +238,7 @@ vulnerability reporting guidance.
 
 Veyra is pre-1.0. The filesystem vertical slice and its security invariants are implemented and
 tested; wire compatibility may still change before 1.0. The evidence-backed
-[`v0.2.0` milestone](https://github.com/tang-vu/veyra/milestone/1) has no promised delivery date and
+[`v0.2.0` milestone](https://github.com/Ontixa/veyra/milestone/1) has no promised delivery date and
 tracks the remaining release, recovery, migration, supply-chain, and independent-review work. See
 [`ROADMAP.md`](ROADMAP.md) and [`CHANGELOG.md`](CHANGELOG.md).
 

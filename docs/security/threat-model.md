@@ -91,7 +91,7 @@ unknown registries, unknown Git sources, and unapproved licenses. `cargo audit -
 reports zero known vulnerabilities, 16 unmaintained transitive warnings, and this one unsound
 warning; OpenSSF Scorecard aggregates all 17 as a dependency finding. Remove the exception and the
 unmaintained paths as soon as Tauri supplies maintained replacements.
-[Issue #4](https://github.com/tang-vu/veyra/issues/4) records the exact advisory groups, dependency
+[Issue #4](https://github.com/Ontixa/veyra/issues/4) records the exact advisory groups, dependency
 paths, and exit criteria; the Dependabot and Scorecard findings remain open. Re-review the issue
 before publishing any Linux desktop artifact. Linux CLI/server archives do not link the
 target-specific GTK graph.

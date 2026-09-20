@@ -80,15 +80,15 @@ release exists, fix the release workflow through the normal protected-main pull-
 a build-only dry run of that reviewed workflow:
 
 ```sh
-gh release view vX.Y.Z --repo tang-vu/veyra
-gh workflow run release.yml --repo tang-vu/veyra --ref main
+gh release view vX.Y.Z --repo Ontixa/veyra
+gh workflow run release.yml --repo Ontixa/veyra --ref main
 ```
 
 The first command must report that the release does not exist. After the dry run passes, an
 authorized maintainer may rebuild and publish the existing tag with:
 
 ```sh
-gh workflow run release.yml --repo tang-vu/veyra --ref main -f release_tag=vX.Y.Z
+gh workflow run release.yml --repo Ontixa/veyra --ref main -f release_tag=vX.Y.Z
 ```
 
 Recovery is accepted only from `refs/heads/main`. Every build job checks out the supplied tag, and
@@ -104,17 +104,23 @@ Download release assets on a clean machine and run the protected verifier with t
 commit. Then independently verify provenance for primary artifacts:
 
 ```sh
-gh release download vX.Y.Z --repo tang-vu/veyra --dir dist
-node scripts/verify-release-assets.mjs vX.Y.Z dist tang-vu/veyra <annotated-tag-commit>
+gh release download vX.Y.Z --repo Ontixa/veyra --dir dist
+node scripts/verify-release-assets.mjs vX.Y.Z dist Ontixa/veyra <annotated-tag-commit>
 gh attestation verify ./dist/veyra-linux-x86_64.tar.gz \
-  --repo tang-vu/veyra \
-  --signer-workflow tang-vu/veyra/.github/workflows/release.yml \
+  --repo Ontixa/veyra \
+  --signer-workflow Ontixa/veyra/.github/workflows/release.yml \
   --deny-self-hosted-runners
 gh attestation verify ./dist/veyra-vX.Y.Z.release-manifest.json \
-  --repo tang-vu/veyra \
-  --signer-workflow tang-vu/veyra/.github/workflows/release.yml \
+  --repo Ontixa/veyra \
+  --signer-workflow Ontixa/veyra/.github/workflows/release.yml \
   --deny-self-hosted-runners
 ```
+
+`v0.1.0` predates the move to the `Ontixa` organization. Its immutable release manifest records
+`tang-vu/veyra`, and its attestations are stored under the `tang-vu` signing account rather than the
+repository's attestation store, so verify that release with `tang-vu/veyra` as the verifier's
+repository argument and
+`gh attestation verify --owner tang-vu --signer-workflow tang-vu/veyra/.github/workflows/release.yml --deny-self-hosted-runners`.
 
 Confirm that the attested release manifest's `sourceCommit` resolves from the immutable tag and that
 every listed digest matches its downloaded asset. Smoke-test `veyra demo --json`, daemon
