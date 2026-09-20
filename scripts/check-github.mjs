@@ -1,9 +1,12 @@
 import { spawnSync } from "node:child_process";
+import { evaluateTagRulesets } from "./release-tag-rules.mjs";
 
 const canonicalRepository = "Ontixa/veyra";
 const repository = process.env.VEYRA_GITHUB_REPOSITORY ?? canonicalRepository;
+const releaseActorLogin = process.env.VEYRA_RELEASE_TAG_ACTOR ?? "tang-vu";
 const apiVersion = "2026-03-10";
 const failures = [];
+const unknowns = [];
 let checks = 0;
 
 function check(condition, message) {
@@ -177,11 +180,18 @@ check(
 const summaries = request(
   `repos/${repository}/rulesets?includes_parents=false`,
 );
-const rulesets = Array.isArray(summaries)
-  ? summaries
-      .map((summary) => request(`repos/${repository}/rulesets/${summary.id}`))
-      .filter(Boolean)
-  : [];
+const rulesets = [];
+const failedRulesetNames = [];
+if (Array.isArray(summaries)) {
+  for (const summary of summaries) {
+    const detail = request(`repos/${repository}/rulesets/${summary.id}`);
+    if (detail) {
+      rulesets.push(detail);
+    } else {
+      failedRulesetNames.push(summary.name);
+    }
+  }
+}
 
 const mainRuleset = rulesets.find((ruleset) => ruleset.name === "Protect main");
 check(mainRuleset?.target === "branch", "Protect main must target branches");
@@ -264,31 +274,19 @@ check(
   "Protect main must not retain stale or unreviewed required checks",
 );
 
-const tagRuleset = rulesets.find(
-  (ruleset) => ruleset.name === "Protect release tags",
-);
-check(tagRuleset?.target === "tag", "Protect release tags must target tags");
-check(
-  tagRuleset?.enforcement === "active",
-  "Protect release tags must be active",
-);
-check(
-  tagRuleset?.conditions?.ref_name?.include?.includes("refs/tags/v*"),
-  "Protect release tags must cover v* tags",
-);
-for (const ruleType of ["creation", "deletion", "non_fast_forward", "update"]) {
-  check(
-    Boolean(ruleByType(tagRuleset, ruleType)),
-    `Protect release tags is missing rule: ${ruleType}`,
-  );
-}
-check(
-  tagRuleset?.bypass_actors?.length === 1 &&
-    tagRuleset.bypass_actors[0].actor_type === "User" &&
-    tagRuleset.bypass_actors[0].actor_id === repo?.owner?.id &&
-    tagRuleset.bypass_actors[0].bypass_mode === "always",
-  "only the repository owner may create or change protected release tags",
-);
+// Release-tag protection is split by design under organization ownership:
+// "Protect release tag creation" holds the single User bypass actor for the
+// release account (resolved to a numeric ID, never repo.owner.id which is the
+// org), while "Protect release tags" guards update/deletion with no bypass.
+const releaseActor = request(`users/${releaseActorLogin}`);
+const tagResult = evaluateTagRulesets({
+  rulesets,
+  releaseActorId: releaseActor?.id,
+  releaseActorLogin,
+  failedRulesetNames,
+});
+failures.push(...tagResult.failures);
+unknowns.push(...tagResult.unknowns);
 
 check(repo?.allow_merge_commit === false, "merge commits must be disabled");
 check(repo?.allow_squash_merge === true, "squash merging must be enabled");
@@ -298,11 +296,22 @@ check(
   "merged pull-request branches must be deleted automatically",
 );
 
+if (unknowns.length > 0) {
+  console.error(
+    `OSS host gate could not verify ${unknowns.length} item(s) (BLOCKED):`,
+  );
+  for (const unknown of unknowns) {
+    console.error(`- ${unknown}`);
+  }
+}
 if (failures.length > 0) {
   console.error(`OSS host gate failed with ${failures.length} problem(s):`);
   for (const failure of failures) {
     console.error(`- ${failure}`);
   }
+  process.exit(1);
+}
+if (unknowns.length > 0) {
   process.exit(1);
 }
 
