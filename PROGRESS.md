@@ -607,3 +607,267 @@ reproducibility, real second-maintainer recovery, an independent trust-boundary 
 existing Tauri advisory-bearing dependency paths. It has no invented owner or delivery date. These
 remain real product, human, or external-dependency work; the passing OSS gates do not imply that they
 are complete.
+
+## 2026-09-22 - trusted-controller TypeScript lifecycle
+
+Added a source-checkout SDK example using the existing v1 API. Its proposal function
+receives only public principal/workspace data. The trusted controller loads the
+administrative token from a file, displays the exact preview and digest, and requires
+operator confirmation (or the explicitly labeled disposable `--demo-approve` mode).
+It checks capability denial, execution rejection before approval, exact grant and
+receipt binding, postconditions, independent filesystem contents, rejected duplicate
+execution, verified rollback and audit. The real-daemon acceptance also checks that
+operator decline leaves no grant, receipt or execution.
+
+Compatibility: no SDK export, wire schema, authority rule, adapter contract or
+dependency changed. Example build/run/test scripts are additive and the example is
+excluded from the published SDK archive. The existing MCP roadmap item is unchanged.
+Threat-model/security-policy review found no new trust boundary: this is a trusted
+local controller, not an isolation mechanism or cryptographic human identity. The
+receipt key remains server-side; partial/manual recovery remains an explicit failure.
+
+Lifecycle verification on Windows, Node 24.14.1 and pnpm 11.20.0:
+
+- Frozen pnpm installation passed without dependency/lockfile changes.
+- `cargo +stable-x86_64-pc-windows-gnu fmt --all -- --check` passed.
+- Node syntax checks for the controller wrapper and acceptance harness passed.
+- `corepack pnpm --filter @veyra/sdk example:build` passed.
+- `corepack pnpm --filter @veyra/sdk example:lifecycle --help` passed.
+- `corepack pnpm check` passed across all workspaces.
+- `corepack pnpm oss:check` passed 520 assertions.
+- `corepack pnpm format` passed for all matched files.
+- `corepack pnpm release:check` passed 27 assertions, and `corepack pnpm lint`
+  passed across all workspaces. A later formatting check caught the new progress
+  entry; repository Prettier corrected it and the full check passed again.
+- Initial `corepack pnpm test` passed the two protocol-schema tests, then the
+  existing SDK `tests/client.test.ts` could not start. Vitest reported
+  `Failed to start forks worker`, caused by `Timeout waiting for worker to respond`.
+  It reported no executed SDK tests. This is a failed gate, not
+  passing test evidence; no timeout or worker configuration was weakened.
+- An isolated retry, `corepack pnpm --filter @veyra/sdk test`, passed all eight
+  existing SDK tests with unchanged defaults (117.46 seconds overall, 70 ms in
+  tests). The initial full-suite failure remains recorded; this does not stand in
+  for the remaining workspace tests or real-API acceptance.
+- A full-suite retry with process-local `TEMP`/`TMP` on the C: drive passed both
+  schema tests and all eight SDK tests, then the unchanged desktop
+  `src/App.test.tsx` worker failed to start with the same Vitest worker-response
+  timeout. No desktop tests executed in that run; this remains a failed full
+  suite, separate from the successful lifecycle acceptance below.
+- An isolated, unchanged desktop retry also failed at worker startup (74.27
+  seconds, no tests executed). No worker settings or deadlines were relaxed.
+- Independent remaining JavaScript gates passed: all 42 release-assets tests,
+  production builds for all workspaces, clean self-contained archives for seven
+  Rust crates and two npm packages, the publication-plan gate's 67 checks, and
+  `corepack pnpm audit --prod --audit-level high` (no known vulnerabilities).
+
+- `cargo +stable-x86_64-pc-windows-gnu build --locked -p veyra-server -p veyra-cli`
+  passed (61 minutes 27 seconds on this host).
+- The first real-daemon `corepack pnpm --filter @veyra/sdk example:test` failed
+  with `Daemon startup timed out` at the unchanged 30-second readiness bound.
+  Its evidence directory was retained at
+  `D:\ytb_tool_temp\veyra-sdk-lifecycle-LukIiE`; no lifecycle success is attributed
+  to that run.
+- An unchanged acceptance retry with process-local `TEMP` and `TMP` set to
+  the user's C-drive OS-temp directory passed: one test, 731 ms execution / 883 ms
+  total. Evidence remains at that directory's `veyra-sdk-lifecycle-32jLVM` child.
+  The source-built daemon proved denial, rejected execution before approval,
+  exact grant/receipt binding, verified file contents, filesystem restoration,
+  valid audit (48 events after rollback), and operator decline without execution.
+  No test deadline, global environment setting or product behavior changed for
+  the retry. The changed temp directory is evidence about this observed retry,
+  not proof of a general startup guarantee or a diagnosed root cause.
+- Real-API acceptance invokes `runController` with programmatic approval and
+  decline callbacks. Independent Node CLI probes passed for `--help` (exit 0),
+  missing required arguments (exit 1, sanitized error), and an unknown option
+  carrying a synthetic private marker (exit 1 without exposing the marker).
+  TTY digest entry, noninteractive approval decisions, and `--demo-approve`
+  execution were source-reviewed, not interaction-tested.
+- A later acceptance extension retained those controller checks and spawned the
+  actual Node CLI twice against the same fixture daemon: default stdin-ignored
+  decline, and explicit `--demo-approve`. Its first run failed in the new test
+  helper because it incorrectly read `plan.effects`; the actual API uses
+  `plan.steps[].effects`. This was an implementation mistake, not an environment
+  failure. Evidence remains in `veyra-sdk-lifecycle-8daGy8` under the C: temp root
+  above. Correcting the helper to the actual typed structure produced a passing
+  run in `veyra-sdk-lifecycle-I8AGCO`: one test, 1,763 ms execution / 1,941 ms total.
+  Default non-TTY CLI left zero grants/executions/receipts and no file; explicit
+  approval produced exactly one grant/execution/receipt/compensation, a
+  `rolled_back` transaction, absent file and valid audit. Boolean assertions
+  verified the bearer was absent from captured stdout/stderr without dumping
+  either output. Child bounds are 30 seconds and 64 KiB combined output; the
+  existing 120-second whole-test and 30-second daemon-startup bounds are unchanged.
+  No native rebuild was added for this JavaScript-only acceptance extension.
+  Interactive TTY digest entry was not covered by that automated acceptance run.
+
+The GNU toolchain is used because the host has no MSVC linker; local Cargo reports
+1.98.1 rather than the repository's pinned 1.96.0 toolchain. The full contributor
+runner (`VEYRA_RUST_TOOLCHAIN=stable-x86_64-pc-windows-gnu ./scripts/verify.ps1`)
+reported Clippy failures in unchanged `crates/veyra-journal/src/lib.rs`: line 2558
+(`map_or_identity`) and line 4673 (`chunks_exact_to_as_chunks`), terminating at
+Rust lint exit 101. No Rust source, lint policy or toolchain pin was changed in
+the lifecycle implementation to suppress these findings.
+
+Remaining gates were collected separately on the unchanged Rust source:
+
+- The first full-feature Rust test build completed in 85 minutes 46 seconds.
+  CLI (4), core (31) and custom-adapter (1) tests passed, then executor finished
+  with 27 passed and one failed: `safe_demo_runs_one_exact_argv_without_a_shell`
+  returned `Timeout` at `process.rs:856`. That test configures a 5,000 ms process
+  limit, spawns its own test executable with exact `--list` argv and an empty
+  environment, and bounds completion plus stdout/stderr draining. The suite's
+  53.84-second duration is not the configured subprocess timeout. No child PID
+  or partial stream output was reported; a host root cause is not established.
+- One warm collection added `--no-fail-fast` to
+  `cargo +stable-x86_64-pc-windows-gnu test --workspace --all-targets --all-features --locked`.
+  All 109 tests passed, including the unchanged process test (executor suite
+  103.32 seconds). The original failure is retained. Desktop test linking emitted
+  the GNU warning `.rsrc merge failure: multiple non-default manifests` in both
+  builds; it was not a failing test exit.
+- Rust documentation passed with `RUSTDOCFLAGS=-D warnings` and
+  `cargo +stable-x86_64-pc-windows-gnu doc --workspace --all-features --no-deps --locked`.
+- Schema generation, verification of all 16 schemas, and schema drift checks
+  passed. `cargo deny check advisories bans licenses sources --hide-inclusion-graph`
+  passed all four policies, with an unmatched `NCSA` license allowance warning.
+- `corepack pnpm eval` failed: 60 passed, one environment-limited (EV-008,
+  Unix-only adversarial symlink fixture), and three failed. EV-028 (SDK) and
+  EV-029 (desktop states) inherit the combined TypeScript gate's exit 1; EV-060
+  (stale inspector response) inherits the desktop gate's exit 1 with its probe
+  absent. The eval runner discards raw child output, so these labels do not
+  establish which assertion or worker failed. Its Rust and demo subgates passed.
+  The exact generated report is retained as `eval-results-first-20260922.json`
+  inside the successful lifecycle fixture above. The generated tracked report
+  was restored to its original contents; no generated test result is added to Git.
+- The final standalone `cargo +stable-x86_64-pc-windows-gnu run --locked -p veyra-cli -- demo --json`
+  passed: committed, valid audit, one receipt and verification, `rolled_back`,
+  and workspace file removed.
+- One isolated desktop retry after that collection again failed at worker
+  startup: `App.test.tsx`, `Timeout waiting for worker to respond`, zero tests,
+  65.99 seconds. This is direct evidence for that isolated run only; it is not
+  a reconstruction of the eval's discarded output. No further retry loop or
+  deadline/configuration change was used.
+
+At that collection point, the lifecycle was implemented and real-API accepted,
+but the repository-wide contributor gate was not fully passing. Desktop/eval
+failures and the original Clippy findings remain explicit; they are not erased
+by successful retries or by a separate later compatibility cleanup.
+
+## 2026-09-22 - separate journal lint compatibility follow-up
+
+The lifecycle gate exposed two newer-Clippy findings on installed GNU Rust 1.98.1.
+A separate journal-only change replaces identity `map_or` with eager `unwrap_or`
+and fixed-size `chunks_exact(2)` with `as_chunks::<2>().0.iter()`. The existing
+even-byte-length guard remains. Defaults, accepted hex characters, byte order,
+empty-input behavior and invalid-input rejection are unchanged; no public API,
+wire/schema, durable representation, authority rule, dependency or toolchain pin
+changed. No migration or new security boundary was introduced. Rust's
+[official slice documentation](https://doc.rust-lang.org/std/primitive.slice.html#method.as_chunks)
+marks `as_chunks` stable since 1.88.0, below the repository minimum 1.96.
+
+A direct nine-case hex regression covers empty input, valid mixed-case bytes,
+odd lengths, invalid high/low nibbles and non-ASCII input. On this follow-up source:
+
+- GNU `cargo fmt --all -- --check` passed.
+- `cargo +stable-x86_64-pc-windows-gnu test --locked -p veyra-journal` passed all
+  32 tests, including the new regression.
+- `cargo +stable-x86_64-pc-windows-gnu clippy --workspace --all-targets --all-features --locked -- -D warnings`
+  passed (2 minutes 34 seconds).
+- `cargo +stable-x86_64-pc-windows-gnu test --workspace --all-targets --all-features --locked`
+  passed all 110 tests on the current journal source (12 minutes 13 seconds build;
+  executor suite 71 seconds with its unchanged 5-second process limit). The
+  existing desktop linker manifest warning remained nonfatal.
+
+This native follow-up is separate from the lifecycle example and did not itself
+resolve the frontend/eval gates. The original Clippy, process-timeout,
+desktop-worker and eval failures above remain part of the record.
+
+## 2026-09-22 - source-identical C-drive TypeScript gate evidence
+
+A retained disposable fixture under
+`%TEMP%/veyra-desktop-offline-6fe6bb27c2994e70962c35f4bd15fc7c`
+isolated the dependency layout without changing test behavior. The initial
+allowlist copied 23 source/manifests/configuration files (155,809 bytes), including
+all three SDK TypeScript configurations and the desktop Vite/TypeScript closure.
+Original and copied SHA-256 hashes matched before and after testing.
+
+The fixture used Node 24.14.1 and pnpm 11.20.0. This command passed, reusing all
+115 packages with zero downloads in 160,512 ms:
+
+```sh
+corepack pnpm install --offline --frozen-lockfile --frozen-store --store-dir D:/dev-cache/pnpm-store --package-import-method copy --ignore-scripts --reporter append-only
+```
+
+`COREPACK_ENABLE_NETWORK=0` and C-drive `TEMP`/`TMP` were process-local; no global
+configuration, lockfile, test pool or deadline changed. Lifecycle install scripts
+were disabled for this disposable installation; inspection of the existing
+installed package manifests found no preinstall/install/postinstall hooks.
+Realpaths for jsdom, Testing Library, Vitest, Vite, React, the SDK workspace link
+and all three native bindings resolved inside the C fixture. Its initial logical
+size was 153,888,679 bytes, below the 1 GiB allowance. No repository credentials,
+runtime state, Rust build output or existing dependency junctions were copied.
+
+The first `corepack pnpm --filter @veyra/desktop test` passed all five tests:
+41.57 seconds in Vitest, 51,482 ms for the command. This proves an observed
+C-layout success, not disk causality or a successful original D-layout run.
+
+The fixture then added exactly 28 source files: the SDK test, protocol-schema
+test and its 16 schemas/two fixtures, and the root release/policy tests with their
+local script dependencies. The expanded closure contained 51 files/375,092 bytes,
+with unchanged original/copy hashes before and after both subsequent commands.
+No reinstall was needed. An external copy helper initially failed during its
+post-copy hash loop because of PowerShell 5 JSON-array wrapping; no test ran then.
+Correcting that external helper and verifying the existing copies allowed these
+two serial canonical gates to run once each:
+
+- `corepack pnpm test`: exit 0 in 24,058 ms; protocol-schema 2/2, SDK 8/8,
+  desktop 5/5 and root release/policy tests 42/42, with no failed or skipped tests.
+- `corepack pnpm --filter @veyra/desktop exec vitest run src --reporter=verbose`:
+  exit 0 in 5,618 ms, all five tests passed, and the exact probe
+  `stale bundle responses cannot overwrite a newer transaction selection`
+  appeared in the output. Vitest reported 3.55 seconds.
+
+The latter commands retained the eval runner's `NO_COLOR=1` and
+`CARGO_TERM_COLOR=never` environment. Their native stdout/stderr, command/exit/
+duration/probe records and hash inventories are retained in the fixture's
+`repro-evidence` directory. The earlier PowerShell transcript omitted native
+stdout; that first run's tool-returned result is separately labeled as a
+transcription, not a raw process log.
+
+These are fresh successful gate results for EV-028/EV-029 (complete TypeScript
+gate) and EV-060 (desktop gate plus named probe), not a synthesized full-eval
+report. The historical full eval remains 60 passed, one environment-limited and
+three failed; its report is preserved and the tracked generated report was not
+rewritten. No claim is made that all contributor gates passed in one invocation.
+The GNU 1.98.1 versus pinned 1.96.0/MSVC and Unix-only EV-008 limitations remain
+explicit. Interactive TTY coverage was collected separately below.
+
+## 2026-09-22 - manual interactive CLI acceptance
+
+The unchanged Node wrapper was exercised through actual Windows PTYs: an initial
+probe confirmed `process.stdin.isTTY`, `stdout.isTTY` and `stderr.isTTY` were all
+true. A fresh source-built daemon bound an ephemeral loopback port with its own
+C-drive temporary data/workspace. An external supervisor bounded daemon readiness
+to 30 seconds and lifetime to five minutes; each CLI child had a 30-second external
+bound. No dependency, native rebuild, product setting or deadline was changed.
+
+Three separate CLI invocations used distinct transactions and the token-file
+argument, never bearer contents in argv or terminal output:
+
+- Enter at the real digest prompt: exit 0, declined. Independent authenticated
+  API checks found `awaiting_approval`, zero grants/executions/receipts/
+  compensations, absent effect file and valid audit.
+- `wrong-digest` at the prompt: exit 0, declined, with the same independent
+  zero-effect assertions on its distinct transaction.
+- The full displayed 64-character digest: exit 0, `rolled_back`. Independent
+  API checks found exactly one grant/execution/receipt/compensation, grant and
+  receipt digests matching the entered digest, successful verification, absent
+  effect file and valid audit. The CLI also checked preapproval rejection,
+  committed file bytes, receipt binding, rejected duplicate execution and
+  restoration; final audit covered 98 events.
+
+All three completed on their first invocation without timeout. The supervisor
+stopped only its owned daemon and exited 0. Sanitized independent API outcome
+records remain as `enter.json`, `wrong.json` and `exact.json` in
+`%TEMP%/veyra-tty-8bNBiw`; the temporary daemon state is retained for inspection.
+This is manual Windows PTY coverage, not an automated TTY CI test, cross-platform
+terminal coverage or cryptographic proof of a human approver. The automated
+acceptance suite continues to cover the non-TTY paths.

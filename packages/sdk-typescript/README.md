@@ -33,3 +33,8 @@ query/fragment-bearing base URLs and redirects; it also bounds request/response 
 60-second timeout, and redacts the configured token from surfaced errors. API failures are
 `VeyraApiError` values with stable `status` and `code`; their terminal-safe message is stripped of
 control characters and capped at 1,024 Unicode characters.
+
+The repository's [trusted-controller lifecycle example](https://github.com/Ontixa/veyra/tree/main/packages/sdk-typescript/examples)
+uses the real API to demonstrate denial, exact operator approval, verified filesystem
+execution, rollback and audit. It includes a real-daemon acceptance test and keeps the
+administrative bearer outside the proposal-producing function.

@@ -109,6 +109,11 @@ approval, executes it, verifies its SHA-256 postcondition, validates the receipt
 rolls the file back. Pass `--directory ./demo-state` to preserve the database and workspace for
 inspection.
 
+For a runnable TypeScript integration, follow the
+[trusted-controller lifecycle example](packages/sdk-typescript/examples/README.md).
+It adds explicit denial and preapproval checks, operator review of the exact digest,
+independent filesystem observations, rollback and audit through the existing SDK.
+
 For a durable local daemon:
 
 ```sh

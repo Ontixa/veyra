@@ -46,7 +46,10 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "example:build": "tsc -p tsconfig.examples.json",
+    "example:lifecycle": "node examples/run-lifecycle.mjs",
+    "example:test": "node --test examples/acceptance.mjs"
   },
   "devDependencies": {
     "typescript": "7.0.2",
