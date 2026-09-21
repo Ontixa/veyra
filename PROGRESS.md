@@ -871,3 +871,59 @@ records remain as `enter.json`, `wrong.json` and `exact.json` in
 This is manual Windows PTY coverage, not an automated TTY CI test, cross-platform
 terminal coverage or cryptographic proof of a human approver. The automated
 acceptance suite continues to cover the non-TTY paths.
+
+## 2026-09-22 - verified release first-run onboarding
+
+README now separates binary consumers from source-build prerequisites and gives
+Linux/Bash and Windows/PowerShell download, checksum/provenance verification,
+extraction and credential-free demo commands. Every verification failure stops
+before extraction/execution. Existing pre-transfer signer identity, immutable
+manifest explanation, unsigned-installer warning and threat-model limits remain.
+No product API, dependency, release asset, tag or hosted setting changed.
+
+Read-only GitHub release inspection confirmed the actual v0.1.0 asset inventory.
+Only the Windows archive/checksum and the small release manifest/checksum were
+downloaded into a new owned OS-temp directory; both attestation bundles were
+downloaded for verification and retained. Before extraction or execution:
+
+- The 10,952,214-byte Windows archive matched its checksum and GitHub asset
+  digest: `7f6f5f0ad5bdd5f3643eac0e0b197bc250c67f98cb2f973aab1fed45b8be1646`.
+- The manifest matched its checksum and asset digest:
+  `68e8fbece53174ed46efa322ae9b3c8c09561609a381e859048b2f96a455cbad`.
+- `gh attestation verify` passed for both artifacts using their downloaded
+  bundles, `--owner tang-vu` and the exact
+  `--signer-workflow tang-vu/veyra/.github/workflows/release.yml`. The manifest
+  bound the archive digest and source commit
+  `8226d69af7471755357d71c6169509bde240c478`, matching the local v0.1.0 tag.
+- ZIP inspection found only LICENSE, README, `veyra.exe` and `veyra-server.exe`
+  under `veyra-windows-x86_64/`; extracted paths remained in the owned directory.
+
+The verified downloaded `veyra.exe demo --json` then passed, exit 0 in 1,023 ms,
+with a 120-second timeout and 1 MiB output bound. Parsed output confirmed
+`committed: true`, one receipt, one verification, `rollback_state: "rolled_back"`,
+`audit_valid: true`, 39 checked events and `workspace_file_removed: true`.
+No unverified downloaded program, provider CLI or model service was invoked.
+Archive, checksums, bundles, verification JSON/stdout/stderr and demo output are
+retained under `%TEMP%/veyra-release-onboarding-53b4eed485504e7388fde3297d798ad8`.
+
+Linux commands were checked against the actual release asset metadata and
+v0.1.0 tagged packaging/CLI source, including the archive's top-level directory.
+No Linux archive was downloaded or Linux binary executed on this Windows host;
+this is source/layout validation, not Linux runtime acceptance. The separate
+TypeScript lifecycle example remains a local, unpushed implementation; this
+downloaded-binary evidence covers the already released CLI demo only.
+
+Verification scope: the actual download/checksum/attestation/demo sequence used
+a bounded local verifier and downloaded attestation bundles (`--bundle`), while
+the README uses GitHub CLI's default online attestation lookup. It was not a
+literal end-to-end execution of the README block. The exact PowerShell block
+parsed successfully; five bounded mocked-command checks covered download failure,
+archive checksum/provenance failure and manifest checksum/provenance failure.
+Every case stopped at its expected error before `Expand-Archive`; no binary was
+invoked by these guard checks. This validates snippet control flow, not another
+cryptographic verification or another downloaded-binary run.
+
+Changed-document Prettier and `git diff --check` passed. `corepack pnpm oss:check`
+passed all 520 assertions. No Rust, frontend, package or full contributor suite
+was rerun for this documentation-only change; prior implementation evidence and
+its historical failures/platform limitations remain separate.

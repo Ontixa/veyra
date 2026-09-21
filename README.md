@@ -56,30 +56,70 @@ The server, CLI, TypeScript SDK, and Tauri application are clients of that bound
 
 ## Quick start
 
-Prerequisites:
-
-- Rust 1.96 (the pinned toolchain is installed automatically by `rustup`)
-- Node.js 22.23.2 LTS or a newer supported LTS and pnpm 11.20 (`corepack enable` is sufficient); CI
-  tests the minimum supported major while `.node-version` pins the default maintainer toolchain
-- platform prerequisites for [Tauri 2](https://v2.tauri.app/start/prerequisites/) only if building the desktop app
-
 ### Download a verified release
+
+The CLI/daemon archives do not require Rust, Node.js or pnpm. The commands below
+use GitHub CLI (`gh`) for downloads and provenance verification, plus your
+platform's extraction and checksum tools. Use a new download directory and stop
+if any verification fails; do not execute an unverified artifact.
 
 The [v0.1.0 release](https://github.com/Ontixa/veyra/releases/tag/v0.1.0) provides Linux and Windows
 CLI/daemon archives plus an unsigned Windows desktop installer. Each binary artifact has a SHA-256
 checksum and a GitHub build-provenance attestation; the release also includes a Syft-generated,
 attested SPDX 2.3 repository dependency snapshot and an attested release manifest binding asset
-digests to the source-tag and release-control commits. Verify downloads before execution:
+digests to the source-tag and release-control commits.
+
+Linux x86-64, in Bash:
 
 ```sh
-gh release download v0.1.0 --repo Ontixa/veyra --dir dist
-cd dist
-for checksum in *.sha256; do sha256sum --check "$checksum"; done
+set -eu
+mkdir veyra-v0.1.0
+cd veyra-v0.1.0
+gh release download v0.1.0 --repo Ontixa/veyra \
+  --pattern 'veyra-linux-x86_64.tar.gz*' \
+  --pattern 'veyra-v0.1.0.release-manifest.json*'
+sha256sum --check veyra-linux-x86_64.tar.gz.sha256
+sha256sum --check veyra-v0.1.0.release-manifest.json.sha256
 gh attestation verify ./veyra-linux-x86_64.tar.gz --owner tang-vu \
   --signer-workflow tang-vu/veyra/.github/workflows/release.yml
 gh attestation verify ./veyra-v0.1.0.release-manifest.json --owner tang-vu \
   --signer-workflow tang-vu/veyra/.github/workflows/release.yml
+tar -xzf veyra-linux-x86_64.tar.gz
+./veyra-linux-x86_64/veyra demo --json
 ```
+
+Windows x86-64, in PowerShell:
+
+```powershell
+$ErrorActionPreference = "Stop"
+New-Item -ItemType Directory -Path veyra-v0.1.0 | Out-Null
+Set-Location veyra-v0.1.0
+gh release download v0.1.0 --repo Ontixa/veyra `
+  --pattern 'veyra-windows-x86_64.zip*' `
+  --pattern 'veyra-v0.1.0.release-manifest.json*'
+if ($LASTEXITCODE -ne 0) { throw "Release download failed" }
+foreach ($file in @("veyra-windows-x86_64.zip", "veyra-v0.1.0.release-manifest.json")) {
+  $expected = ((Get-Content -LiteralPath "$file.sha256" -Raw).Trim() -split '\s+')[0]
+  $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+  if ($expected -notmatch '^[0-9a-fA-F]{64}$' -or $actual -ne $expected) {
+    throw "Checksum mismatch: $file"
+  }
+  gh attestation verify $file --owner tang-vu `
+    --signer-workflow tang-vu/veyra/.github/workflows/release.yml
+  if ($LASTEXITCODE -ne 0) { throw "Provenance verification failed: $file" }
+}
+Expand-Archive -LiteralPath veyra-windows-x86_64.zip -DestinationPath unpacked
+.\unpacked\veyra-windows-x86_64\veyra.exe demo --json
+if ($LASTEXITCODE -ne 0) { throw "Demo failed; inspect the output" }
+```
+
+The credential-free demo starts its own ephemeral local API, creates and verifies
+one fixture file, then rolls it back. Expected JSON includes `committed: true`,
+`receipt_count: 1`, `verification_count: 1`, `rollback_state: "rolled_back"`,
+`audit_valid: true` and `workspace_file_removed: true`. No separate daemon or model
+account is needed. To retain demo state, append `--directory ./demo-state` using
+a fresh disposable directory. Checksums and provenance identify artifact bytes
+and their signer; they do not make the downloaded code a sandbox.
 
 The repository moved to the `Ontixa` organization after v0.1.0 was published. Downloads come from
 `Ontixa/veyra`, but the release's immutable manifest records `tang-vu/veyra` and its provenance
@@ -94,6 +134,14 @@ gate and the binary-scoped SBOM contract used by subsequent releases without rew
 v0.1.0 assets.
 
 ### Run from source
+
+Source prerequisites:
+
+- Rust 1.96 (the pinned toolchain is installed automatically by `rustup`)
+- Node.js 22.23.2 LTS or a newer supported LTS and pnpm 11.20 for the TypeScript
+  SDK/examples or desktop; they are not required for the Rust CLI demo below. CI
+  tests the minimum supported major while `.node-version` pins the default maintainer toolchain
+- platform prerequisites for [Tauri 2](https://v2.tauri.app/start/prerequisites/) only if building the desktop app
 
 Run the complete deterministic flow—no API key or paid service is used:
 
