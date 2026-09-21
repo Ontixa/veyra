@@ -2555,7 +2555,7 @@ fn initialize(connection: &Connection, durable: bool) -> Result<(), JournalError
         )
         .optional()
         .map_err(JournalError::Database)?;
-    let (count, head) = latest.map_or((0_i64, GENESIS_HASH.to_owned()), |value| value);
+    let (count, head) = latest.unwrap_or((0_i64, GENESIS_HASH.to_owned()));
     connection
         .execute(
             "INSERT OR IGNORE INTO metadata(key, value) VALUES (?1, ?2)",
@@ -4670,7 +4670,9 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = hex_digit(pair[0])?;
             let low = hex_digit(pair[1])?;
@@ -4725,6 +4727,24 @@ mod tests {
 
     fn journal() -> Journal {
         Journal::in_memory([7; 32]).unwrap()
+    }
+
+    #[test]
+    fn hex_decoding_preserves_pairs_and_rejects_malformed_input() {
+        let cases = [
+            ("", Some(vec![])),
+            ("00", Some(vec![0])),
+            ("aB00fF", Some(vec![0xab, 0x00, 0xff])),
+            ("0", None),
+            ("abc", None),
+            ("g0", None),
+            ("0g", None),
+            ("\u{00e9}", None),
+            ("\u{00e9}0", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(decode_hex(input), expected, "input {input:?}");
+        }
     }
 
     fn transaction(state: TransactionState) -> Transaction {
