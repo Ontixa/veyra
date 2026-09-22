@@ -611,7 +611,7 @@ for (const marker of [
   "scripts/check-artifact-sbom.mjs",
   "name: Attest core binary SBOMs",
   "name: Attest desktop payload SBOM",
-  "anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0",
+  "anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2",
   "syft-version: v1.42.3",
   "config: ${{ inputs.release_tag != '' && '.release-control/.syft.yaml' || '.syft.yaml' }}",
   "veyra-$VEYRA_RELEASE_TAG.spdx.json",
