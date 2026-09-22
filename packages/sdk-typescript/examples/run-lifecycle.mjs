@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
@@ -38,11 +38,16 @@ export async function runController({
     report,
     readFile: async (path) => {
       const target = localPath(path);
-      assert.ok(
-        (await lstat(target)).isFile(),
-        "Expected a regular fixture file",
-      );
-      return readFile(target, "utf8");
+      const handle = await open(target, "r");
+      try {
+        assert.ok(
+          (await handle.stat()).isFile(),
+          "Expected a regular fixture file",
+        );
+        return await handle.readFile("utf8");
+      } finally {
+        await handle.close();
+      }
     },
     assertAbsent: async (path) => {
       try {
