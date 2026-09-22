@@ -140,8 +140,16 @@ enum TransactionCommand {
     Preview { id: TransactionId },
     /// Execute and verify an approved transaction.
     Run { id: TransactionId },
-    /// Inspect the full causal transaction bundle.
-    Inspect { id: TransactionId },
+    /// Inspect the causal transaction bundle; events return as a resumable page.
+    Inspect {
+        id: TransactionId,
+        /// Maximum audit events returned in this page (1..=5000).
+        #[arg(long, default_value_t = 1_000)]
+        limit: usize,
+        /// Opaque cursor returned by a previous bundle page.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Roll back or compensate supported effects.
     Rollback { id: TransactionId },
 }
@@ -296,8 +304,10 @@ async fn run_transaction_command(
         TransactionCommand::Run { id } => {
             client.post_empty(&format!("transactions/{id}/run")).await
         }
-        TransactionCommand::Inspect { id } => {
-            client.get(&format!("transactions/{id}/bundle")).await
+        TransactionCommand::Inspect { id, limit, cursor } => {
+            client
+                .get(&bundle_path(&id.to_string(), limit, cursor.as_deref())?)
+                .await
         }
         TransactionCommand::Rollback { id } => {
             client
@@ -334,6 +344,21 @@ async fn run_audit_command(client: &ApiClient, command: AuditCommand) -> Result<
                 .await
         }
     }
+}
+
+fn bundle_path(id: &str, limit: usize, cursor: Option<&str>) -> Result<String, CliError> {
+    if !(1..=5_000).contains(&limit) {
+        return Err(CliError::Input(
+            "bundle event page limit must be within 1..=5000".into(),
+        ));
+    }
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("limit", &limit.to_string());
+    if let Some(cursor) = cursor {
+        validate_page_cursor(cursor)?;
+        serializer.append_pair("cursor", cursor);
+    }
+    Ok(format!("transactions/{id}/bundle?{}", serializer.finish()))
 }
 
 fn page_path(path: &str, limit: usize, cursor: Option<&str>) -> Result<String, CliError> {

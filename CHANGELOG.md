@@ -7,6 +7,11 @@ Changelog conventions.
 
 ### Added
 
+- Bounded the per-transaction bundle event timeline: `GET /v1/transactions/{id}/bundle` accepts
+  `limit`/`cursor` and returns the ascending causal `events` page plus `events_next_cursor`
+  (default 1,000, maximum 5,000). The TypeScript SDK accepts page options on
+  `getTransactionBundle`, `veyra tx inspect` exposes `--limit`/`--cursor`, and the desktop inspector
+  resumes the timeline with a "Load later events" control instead of silently truncating.
 - Added a first-class MCP interception example (`packages/sdk-typescript/examples/`):
   a minimal newline-delimited JSON-RPC stdio surface implementing `initialize`,
   `ping`, `tools/list`, and `tools/call`, where the side-effecting tool is routed

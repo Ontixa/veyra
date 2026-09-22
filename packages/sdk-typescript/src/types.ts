@@ -331,7 +331,10 @@ export interface TransactionBundle {
   receipts: Receipt[];
   verifications: Verification[];
   compensations: Compensation[];
+  /** Causal audit timeline in ascending sequence order, bounded to one page. */
   events: AuditEvent[];
+  /** Opaque cursor continuing `events` through the same call; `null` when complete. */
+  events_next_cursor: string | null;
 }
 
 export interface DemoSeed {

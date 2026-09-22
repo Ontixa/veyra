@@ -988,3 +988,72 @@ individually as listed above) and the desktop vitest suite, which failed
 again at worker startup (`Timeout waiting for worker to respond`, zero tests
 executed) exactly as previously recorded for this D-drive layout; the desktop
 package is untouched by this change.
+
+## 2026-09-22 - bounded per-transaction bundle event pages
+
+- Closed the remaining unbounded read path noted in the 2026-08-24 audit:
+  `GET /v1/transactions/{id}/bundle` now accepts `limit`/`cursor` and returns
+  the ascending causal `events` timeline as a keyset page plus
+  `events_next_cursor` (default 1,000, maximum 5,000). The page is read inside
+  the same grouped SQLite snapshot as the rest of the bundle via the new
+  `JournalRead::audit_event_page`, so a bundle still cannot mix revisions.
+- Wire compatibility is additive: the new optional query parameters and the
+  nullable `events_next_cursor` field keep old clients and old serialized
+  responses interoperable in both directions. No `veyra-protocol` type
+  changed, so the 16 generated JSON Schemas are byte-identical.
+- `veyra tx inspect` exposes `--limit`/`--cursor`; the TypeScript SDK accepts
+  `PageOptions` on `getTransactionBundle`; the desktop inspector resumes the
+  timeline through a conditional "Load later events" control with the existing
+  stale-response race guard instead of silently truncating.
+- New regression coverage: a journal snapshot-page contract test, a live API
+  test proving bounded/resumable bundle pages and `400` fail-closed handling
+  for `limit=0`, `limit=5001`, malformed cursors, and unknown query fields,
+  SDK request-shape tests, and a desktop timeline append test.
+
+Verification on this Windows host (GNU Rust 1.98.1; MSVC absent as documented):
+
+```text
+cargo +stable-x86_64-pc-windows-gnu fmt --all -- --check
+cargo +stable-x86_64-pc-windows-gnu clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo +stable-x86_64-pc-windows-gnu test --workspace --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo +stable-x86_64-pc-windows-gnu doc --workspace --all-features --no-deps --locked
+cargo +stable-x86_64-pc-windows-gnu run --locked -p veyra-protocol --example generate-schema -- packages/protocol-schema/schema
+node packages/protocol-schema/scripts/verify-generated.mjs
+git diff --exit-code -- packages/protocol-schema/schema
+cargo deny check advisories bans licenses sources --hide-inclusion-graph
+corepack pnpm install --frozen-lockfile
+corepack pnpm oss:check
+corepack pnpm release:check
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm package:check
+corepack pnpm audit --prod --audit-level high
+corepack pnpm eval
+cargo +stable-x86_64-pc-windows-gnu run --locked -p veyra-cli -- demo --json
+```
+
+Results: workspace `cargo test` passed 112 tests across 12 binaries with zero
+failures, including the new journal and API tests. All 16 generated schemas
+verified with no drift. `oss:check` passed 520 assertions, `release:check` 27,
+`package:check` 67 plus the archive gate, and `pnpm audit` found no
+vulnerabilities. Evals: 63 passed, 1 environment-limited (EV-008 remains the
+documented unprivileged-Windows symlink fixture), 0 failed. The demo committed
+1 effect, authenticated 1 receipt, passed 1 verification, checked 39 events,
+rolled back, and removed the workspace file.
+
+Failed runs recorded: `apps/desktop` vitest worker startup timed out twice at
+the hardcoded 60-second bound (`Timeout waiting for worker to respond`, zero
+tests executed) while the disk was cold — the same D-drive environment
+limitation recorded on 2026-09-22 earlier; with the Vite cache warm the full
+desktop suite passed (6/6, 66.4s). The GNU-linker `.rsrc` manifest warning on
+the `veyra-desktop` test binary is pre-existing and unchanged.
+
+Residual risk: bundle pages are consistent per request but not across
+requests; a transaction that keeps accruing events between page reads can
+return a refreshed snapshot on later pages (the ascending sequence keyset
+keeps the events themselves stable and deduplicated). High-volume audit
+verification still streams internally but is not resumable; that remains on
+the roadmap.

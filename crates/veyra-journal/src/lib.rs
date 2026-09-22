@@ -748,40 +748,8 @@ impl Journal {
         limit: usize,
         cursor: Option<&str>,
     ) -> Result<JournalPage<AuditEvent>, JournalError> {
-        validate_page_limit(limit, MAXIMUM_AUDIT_PAGE_SIZE, "audit")?;
-        let after = cursor.map(decode_audit_cursor).transpose()?.unwrap_or(0);
-        let after = i64::try_from(after).map_err(|_| {
-            JournalError::InvalidCursor("audit cursor exceeds the supported sequence range")
-        })?;
-        let query_limit = i64::try_from(limit.saturating_add(1))
-            .map_err(|_| JournalError::InvalidCursor("audit page limit is too large"))?;
         let connection = self.lock()?;
-        let mut statement = connection
-            .prepare(if transaction_id.is_some() {
-                "SELECT id, transaction_id, sequence, event_type, causal_parent, payload_json, previous_hash, hash, recorded_at FROM audit_events WHERE transaction_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT ?3"
-            } else {
-                "SELECT id, transaction_id, sequence, event_type, causal_parent, payload_json, previous_hash, hash, recorded_at FROM audit_events WHERE sequence > ?1 ORDER BY sequence LIMIT ?2"
-            })
-            .map_err(JournalError::Database)?;
-        let mut rows = if let Some(id) = transaction_id {
-            statement
-                .query(params![id.to_string(), after, query_limit])
-                .map_err(JournalError::Database)?
-        } else {
-            statement
-                .query(params![after, query_limit])
-                .map_err(JournalError::Database)?
-        };
-        let mut items = Vec::with_capacity(limit.saturating_add(1));
-        while let Some(row) = rows.next().map_err(JournalError::Database)? {
-            items.push(audit_event_from_row(row)?);
-        }
-        let has_more = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = has_more
-            .then(|| items.last().map(|event| event.sequence.to_string()))
-            .flatten();
-        Ok(JournalPage { items, next_cursor })
+        audit_event_page(&connection, transaction_id, limit, cursor)
     }
 
     /// Export one newest-first audit-event page before an opaque sequence cursor.
@@ -2356,6 +2324,25 @@ impl JournalRead<'_> {
     ) -> Result<Vec<AuditEvent>, JournalError> {
         read_events(self.connection, transaction_id)
     }
+
+    /// Export one ascending audit-event page after an opaque sequence cursor.
+    ///
+    /// The page is read inside this snapshot, so it stays consistent with any other
+    /// [`JournalRead`] calls in the same grouped read. Cursors share the
+    /// [`Journal::audit_event_page`] contract and remain usable across separate reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError::InvalidCursor`] for malformed bounds/cursors, or a database or
+    /// serialization error.
+    pub fn audit_event_page(
+        &self,
+        transaction_id: Option<TransactionId>,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<JournalPage<AuditEvent>, JournalError> {
+        audit_event_page(self.connection, transaction_id, limit, cursor)
+    }
 }
 
 /// One bounded keyset page from the durable journal.
@@ -2811,6 +2798,47 @@ fn event_hash(
         "recorded_at": recorded_at,
     }))
     .map_err(JournalError::Canonical)
+}
+
+fn audit_event_page(
+    connection: &Connection,
+    transaction_id: Option<TransactionId>,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<JournalPage<AuditEvent>, JournalError> {
+    validate_page_limit(limit, MAXIMUM_AUDIT_PAGE_SIZE, "audit")?;
+    let after = cursor.map(decode_audit_cursor).transpose()?.unwrap_or(0);
+    let after = i64::try_from(after).map_err(|_| {
+        JournalError::InvalidCursor("audit cursor exceeds the supported sequence range")
+    })?;
+    let query_limit = i64::try_from(limit.saturating_add(1))
+        .map_err(|_| JournalError::InvalidCursor("audit page limit is too large"))?;
+    let mut statement = connection
+        .prepare(if transaction_id.is_some() {
+            "SELECT id, transaction_id, sequence, event_type, causal_parent, payload_json, previous_hash, hash, recorded_at FROM audit_events WHERE transaction_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT ?3"
+        } else {
+            "SELECT id, transaction_id, sequence, event_type, causal_parent, payload_json, previous_hash, hash, recorded_at FROM audit_events WHERE sequence > ?1 ORDER BY sequence LIMIT ?2"
+        })
+        .map_err(JournalError::Database)?;
+    let mut rows = if let Some(id) = transaction_id {
+        statement
+            .query(params![id.to_string(), after, query_limit])
+            .map_err(JournalError::Database)?
+    } else {
+        statement
+            .query(params![after, query_limit])
+            .map_err(JournalError::Database)?
+    };
+    let mut items = Vec::with_capacity(limit.saturating_add(1));
+    while let Some(row) = rows.next().map_err(JournalError::Database)? {
+        items.push(audit_event_from_row(row)?);
+    }
+    let has_more = items.len() > limit;
+    items.truncate(limit);
+    let next_cursor = has_more
+        .then(|| items.last().map(|event| event.sequence.to_string()))
+        .flatten();
+    Ok(JournalPage { items, next_cursor })
 }
 
 fn read_events(
@@ -5423,6 +5451,65 @@ mod tests {
             journal.audit_event_page(None, 0, None),
             Err(JournalError::InvalidCursor(_))
         ));
+    }
+
+    #[test]
+    fn snapshot_audit_pages_match_the_keyset_contract() {
+        let journal = journal();
+        let first = transaction(TransactionState::Draft);
+        journal.create_transaction(&first).unwrap();
+        let second = transaction(TransactionState::Draft);
+        journal.create_transaction(&second).unwrap();
+        journal
+            .append_event(
+                Some(first.id),
+                "transaction.annotated",
+                None,
+                json!({"note": "snapshot page"}),
+            )
+            .unwrap();
+        let unrelated = TransactionId::new();
+        journal
+            .append_event(
+                Some(unrelated),
+                "transaction.annotated",
+                None,
+                json!({"note": "outside the scoped transaction"}),
+            )
+            .unwrap();
+
+        journal
+            .read_snapshot(|snapshot| {
+                let unfiltered = snapshot.audit_event_page(None, 100, None)?;
+                assert!(unfiltered.next_cursor.is_none());
+                assert_eq!(unfiltered.items.len(), 4);
+
+                let first_page = snapshot.audit_event_page(Some(first.id), 1, None)?;
+                assert_eq!(first_page.items.len(), 1);
+                assert_eq!(first_page.items[0].sequence, 1);
+                assert!(first_page.next_cursor.is_some());
+                let second_page = snapshot.audit_event_page(
+                    Some(first.id),
+                    1,
+                    first_page.next_cursor.as_deref(),
+                )?;
+                assert_eq!(second_page.items.len(), 1);
+                assert!(second_page.items[0].sequence > first_page.items[0].sequence);
+                assert!(second_page.next_cursor.is_none());
+                let exhausted = snapshot.audit_event_page(
+                    Some(first.id),
+                    1,
+                    Some(second_page.items[0].sequence.to_string().as_str()),
+                )?;
+                assert!(exhausted.items.is_empty());
+                assert!(exhausted.next_cursor.is_none());
+                assert!(matches!(
+                    snapshot.audit_event_page(Some(first.id), 1, Some("not-a-cursor")),
+                    Err(JournalError::InvalidCursor(_))
+                ));
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

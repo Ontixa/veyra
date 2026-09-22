@@ -167,6 +167,7 @@ describe("Veyra desktop control plane", () => {
       verifications: [],
       compensations: [],
       events: [],
+      events_next_cursor: null,
     });
     let resolveFirst: ((response: Response) => void) | undefined;
     const firstResponse = new Promise<Response>((resolve) => {
@@ -231,6 +232,140 @@ describe("Veyra desktop control plane", () => {
     expect(
       screen.queryByRole("heading", { name: "First transaction" }),
     ).toBeNull();
+  });
+
+  it("pages the bundle event timeline without losing earlier events", async () => {
+    localStorage.setItem("veyra.apiUrl", "http://127.0.0.1:7843/v1/");
+    localStorage.setItem("veyra.token", TOKEN);
+    const now = "2026-08-23T00:00:00Z";
+    const event = (sequence: number) => ({
+      id: `event-${sequence}`,
+      transaction_id: "tx-a",
+      sequence,
+      event_type: `transaction.step_${sequence}`,
+      causal_parent: null,
+      payload: {},
+      previous_hash: `prev-${sequence}`,
+      hash: `hash-${sequence}`,
+      recorded_at: now,
+    });
+    const bundle = (events: unknown[], nextCursor: string | null) => ({
+      transaction: {
+        schema_version: "veyra.protocol/v1",
+        id: "tx-a",
+        intent_id: "intent-tx-a",
+        plan_id: "plan-tx-a",
+        state: "planned",
+        effect_ids: [],
+        receipt_ids: [],
+        revision: 0,
+        created_at: now,
+        updated_at: now,
+        manual_recovery_reason: null,
+      },
+      intent: {
+        schema_version: "veyra.protocol/v1",
+        id: "intent-tx-a",
+        principal_id: "principal",
+        summary: "Paged timeline transaction",
+        requested_resources: [],
+        context: {},
+        created_at: now,
+      },
+      plan: {
+        schema_version: "veyra.protocol/v1",
+        id: "plan-tx-a",
+        intent_id: "intent-tx-a",
+        planner: "test",
+        steps: [],
+        created_at: now,
+      },
+      policy_decisions: [],
+      approval_requests: [],
+      approval_grants: [],
+      executions: [],
+      receipts: [],
+      verifications: [],
+      compensations: [],
+      events,
+      events_next_cursor: nextCursor,
+    });
+    const fetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = new URL(
+          input instanceof Request ? input.url : input.toString(),
+        );
+        if (url.pathname.endsWith("/health")) {
+          return Response.json({
+            status: "ok",
+            api_version: "v1",
+            protocol_version: "veyra.protocol/v1",
+          });
+        }
+        if (url.pathname.endsWith("/transactions/page")) {
+          return Response.json({
+            items: [
+              {
+                schema_version: "veyra.protocol/v1",
+                id: "tx-a",
+                intent_id: "intent-tx-a",
+                plan_id: "plan-tx-a",
+                state: "planned",
+                effect_ids: [],
+                receipt_ids: [],
+                revision: 0,
+                created_at: now,
+                updated_at: now,
+                manual_recovery_reason: null,
+              },
+            ],
+            next_cursor: null,
+          });
+        }
+        if (url.pathname.endsWith("/audit/events/page")) {
+          return Response.json({ items: [], next_cursor: null });
+        }
+        if (url.pathname.endsWith("/audit/verify")) {
+          return Response.json({
+            valid: true,
+            events_checked: 2,
+            first_invalid_sequence: null,
+            message: "journal is valid",
+          });
+        }
+        if (url.pathname.endsWith("/transactions/tx-a/bundle")) {
+          if (url.searchParams.get("cursor") === "1") {
+            return Response.json(bundle([event(2)], null));
+          }
+          return Response.json(bundle([event(1)], "1"));
+        }
+        return Response.json(
+          { error: { code: "not_found", message: "not found" } },
+          { status: 404 },
+        );
+      });
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Paged timeline transaction",
+      }),
+    ).toBeTruthy();
+    const more = await screen.findByRole("button", {
+      name: "Load later events",
+    });
+    fireEvent.click(more);
+
+    await waitFor(() =>
+      expect(screen.getByText("transaction / step_2")).toBeTruthy(),
+    );
+    expect(screen.getByText("transaction / step_1")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Load later events" }),
+    ).toBeNull();
+    expect(fetch).toHaveBeenCalled();
   });
 
   it("surfaces an asynchronous bootstrap connection failure", async () => {
