@@ -7,6 +7,11 @@ Changelog conventions.
 
 ### Added
 
+- Added a TypeScript trusted-controller example and real-daemon acceptance covering
+  capability denial, execution rejection before exact approval, verified filesystem
+  creation, receipt binding, rollback, audit and operator decline. No protocol or SDK
+  API changes are required.
+
 - Added five binary-scoped SPDX 2.3 SBOMs generated from dependency metadata embedded in the exact
   Linux/Windows CLI and daemon binaries plus the desktop executable extracted from the NSIS
   installer, with subject-digest validation, checksums, and build attestations.
