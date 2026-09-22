@@ -161,6 +161,10 @@ For a runnable TypeScript integration, follow the
 [trusted-controller lifecycle example](packages/sdk-typescript/examples/README.md).
 It adds explicit denial and preapproval checks, operator review of the exact digest,
 independent filesystem observations, rollback and audit through the existing SDK.
+The same directory carries a minimal MCP-interception surface—`tools/call` becomes
+an intent gated by capability and exact approval, with no approval tool exposed—and
+an agent-to-agent receipt exchange that reconciles claimed receipts against the
+authoritative journal.
 
 For a durable local daemon:
 

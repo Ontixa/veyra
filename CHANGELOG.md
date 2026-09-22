@@ -7,6 +7,17 @@ Changelog conventions.
 
 ### Added
 
+- Added a first-class MCP interception example (`packages/sdk-typescript/examples/`):
+  a minimal newline-delimited JSON-RPC stdio surface implementing `initialize`,
+  `ping`, `tools/list`, and `tools/call`, where the side-effecting tool is routed
+  through Veyra intents, preflight, capability checks, and exact operator
+  approval. The surface exposes no approval or capability tool.
+- Added an agent-to-agent receipt exchange example: a producer emits an
+  A2A-shaped task result carrying a receipt claim, and the consumer reconciles
+  the untrusted claim against the authoritative journal (receipt binding,
+  committed state, passing postconditions, valid audit chain) while rejecting
+  forged and unknown claims. This demonstrates evidence reconciliation, not
+  remote attestation.
 - Added a TypeScript trusted-controller example and real-daemon acceptance covering
   capability denial, execution rejection before exact approval, verified filesystem
   creation, receipt binding, rollback, audit and operator decline. No protocol or SDK

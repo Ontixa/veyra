@@ -49,6 +49,8 @@
     "test": "vitest run",
     "example:build": "tsc -p tsconfig.examples.json",
     "example:lifecycle": "node examples/run-lifecycle.mjs",
+    "example:mcp": "node examples/run-mcp-interception.mjs",
+    "example:a2a": "node examples/run-a2a-receipts.mjs",
     "example:test": "node --test examples/acceptance.mjs"
   },
   "devDependencies": {

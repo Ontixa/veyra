@@ -927,3 +927,64 @@ Changed-document Prettier and `git diff --check` passed. `corepack pnpm oss:chec
 passed all 520 assertions. No Rust, frontend, package or full contributor suite
 was rerun for this documentation-only change; prior implementation evidence and
 its historical failures/platform limitations remain separate.
+
+## 2026-09-22 - MCP interception and A2A receipt exchange examples
+
+Implements the roadmap "Next" item with two runnable examples under
+`packages/sdk-typescript/examples/`, using only the existing v1 SDK and
+protocol; no dependency, wire type, or authority rule changed.
+
+- `mcp-interception.ts` is a minimal MCP-shaped tool surface over
+  newline-delimited JSON-RPC stdio (`initialize`, `ping`, `tools/list`,
+  `tools/call` only). `mcp-stdio-server.mjs` is the spawned entry point;
+  `run-mcp-interception.mjs` drives it as an MCP client while a separate
+  operator role issues a one-use `create` capability scoped to `mcp/` and
+  grants the exact digest. The surface exposes no approval or capability
+  tool; malformed input, pre-`initialize` traffic, unknown tools, and
+  traversal paths are rejected before any daemon call.
+- `a2a-receipts.ts` builds an A2A-shaped task result carrying a receipt claim
+  and reconciles untrusted claims against the authoritative transaction
+  bundle plus `audit/verify`. `run-a2a-receipts.mjs` rejects a forged digest
+  and an unknown transaction before accepting the genuine claim. The MAC key
+  stays daemon-side; this is evidence reconciliation, not remote attestation.
+
+Environment: Windows, Node 24.14.1, pnpm 11.20.0, GNU Rust 1.98.1 (host lacks
+MSVC; pinned 1.96.0 is installed but the GNU toolchain was used for the
+pre-existing `target/debug/veyra-server.exe` the acceptance ran against).
+`TEMP`/`TMP` were pointed at the C-drive temp directory per the earlier
+documented D-drive worker/startup failures.
+
+Verification:
+
+- `corepack pnpm install --frozen-lockfile`: clean, no lockfile changes.
+- `corepack pnpm --filter @veyra/sdk example:build`, `check`, and repository
+  `corepack pnpm check`/`lint`/`build`/`format` all passed.
+- `corepack pnpm oss:check` passed 520 assertions; `package:check` passed the
+  7-crate/2-npm archive gate and the 67-check publication plan;
+  `release:check` passed 27 assertions; `pnpm audit --prod --audit-level high`
+  found no vulnerabilities; all 42 release-assets tests passed.
+- `cargo fmt --all -- --check` passed (no Rust source changed).
+- `cargo +stable-x86_64-pc-windows-gnu clippy --workspace --all-targets
+--all-features --locked -- -D warnings` passed with zero warnings.
+- `cargo +stable-x86_64-pc-windows-gnu test --workspace --all-targets
+--all-features --locked` exited 0: 12 test binaries, 110 tests passed,
+  zero failures. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--all-features --no-deps --locked` (same toolchain) finished clean.
+- Real-daemon acceptance
+  (`VEYRA_EXAMPLE_SERVER=target/debug/veyra-server.exe node --test examples/acceptance.mjs`)
+  passed both tests: the unchanged lifecycle test and the new
+  MCP/A2A test covering in-process commit/decline, denial of an out-of-prefix
+  path, protocol probes (parse error -32700, pre-init -32600, unknown
+  authority-shaped tool, traversal rejection), forged/unknown receipt-claim
+  rejection, journal reconciliation, and both actual `--demo-approve` example
+  CLIs with the bearer absent from captured output. One earlier acceptance
+  attempt timed out at the 30-second daemon-startup bound while a concurrent
+  `cargo test` rebuild was writing the same `target/debug`; the rerun after
+  the build finished passed both tests, confirming resource contention rather
+  than a defect.
+
+Not rerun: `./scripts/verify.ps1` end to end (its constituent gates were run
+individually as listed above) and the desktop vitest suite, which failed
+again at worker startup (`Timeout waiting for worker to respond`, zero tests
+executed) exactly as previously recorded for this D-drive layout; the desktop
+package is untouched by this change.

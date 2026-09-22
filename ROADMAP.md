@@ -27,7 +27,10 @@ execution boundary take priority over adapter count.
   verification; transaction, audit-event/export, and recovery list pages are implemented
 - A versioned precondition-evaluation contract; V0.1 deliberately rejects non-empty preconditions
 - An authenticated audit anchor outside SQLite or optional remote transparency sink
-- First-class MCP interception example and A2A receipt exchange example
+- ~~First-class MCP interception example and A2A receipt exchange example~~ — delivered as runnable
+  SDK examples (`packages/sdk-typescript/examples/`): a minimal MCP-shaped stdio tool surface gated
+  by Veyra capability/approval policy, and an A2A-shaped task result whose receipt claim is
+  reconciled against the authoritative journal
 - Broader Windows reparse-point and network-filesystem adversarial testing
 - Native no-replace rename support for filesystems that do not provide regular-file hard links
 - Removal of Tauri's advisory-bearing GTK3, `glib`, and `rust-unic` dependency paths when upstream

@@ -23,3 +23,10 @@ Framework guardrails and prompts are valuable for proposal quality. They are not
 engine: prompt text cannot consume a nonce, constrain a directory handle, reserve an idempotency key,
 or authenticate a receipt. Veyra intentionally stays model-independent so frameworks can change
 without changing the execution trust boundary.
+
+Runnable demonstrations live in the TypeScript SDK
+[examples](../packages/sdk-typescript/examples/README.md): a minimal MCP-shaped stdio tool surface
+whose side-effecting `tools/call` requests are intercepted as intents gated by capability and exact
+approval (with no approval tool exposed to the agent), and an A2A-shaped task result carrying a
+receipt claim that the consumer reconciles against the authoritative journal rather than trusting the
+message.
