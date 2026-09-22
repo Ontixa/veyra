@@ -233,4 +233,139 @@ mod tests {
         assert_eq!(invalid_page.status(), StatusCode::BAD_REQUEST);
         server.abort();
     }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn bundle_event_pages_are_bounded_resumable_and_fail_closed() {
+        let temporary = TempDir::new().unwrap();
+        let config = RuntimeConfig::new(
+            temporary.path().join("data"),
+            temporary.path().join("workspace"),
+        );
+        let instance = prepare_instance(&config).unwrap();
+        let state = ApiState::new(
+            instance.kernel,
+            Arc::clone(&instance.token),
+            config.workspace_name,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(listener, state));
+        let client = reqwest::Client::new();
+        let root = format!("http://{address}/v1");
+
+        let seed: DemoSeed = client
+            .post(format!("{root}/demo/seed"))
+            .bearer_auth(&*instance.token)
+            .json(&DemoSeedRequest::default())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let transaction_id = seed.submission.transaction.id;
+        client
+            .post(format!("{root}/transactions/{transaction_id}/preview"))
+            .bearer_auth(&*instance.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        let complete: TransactionBundle = client
+            .get(format!("{root}/transactions/{transaction_id}/bundle"))
+            .bearer_auth(&*instance.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(complete.events.len() > 1);
+        assert!(complete.events_next_cursor.is_none());
+        assert!(
+            complete
+                .events
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+
+        let first: TransactionBundle = client
+            .get(format!(
+                "{root}/transactions/{transaction_id}/bundle?limit=1"
+            ))
+            .bearer_auth(&*instance.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.events[0].id, complete.events[0].id);
+        assert_eq!(first.transaction.id, complete.transaction.id);
+        let cursor = first.events_next_cursor.unwrap();
+
+        let mut resumed_events = first.events.clone();
+        let mut cursor = Some(cursor);
+        while let Some(active) = cursor {
+            let page: TransactionBundle = client
+                .get(format!(
+                    "{root}/transactions/{transaction_id}/bundle?limit=2&cursor={active}"
+                ))
+                .bearer_auth(&*instance.token)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            resumed_events.extend(page.events.iter().cloned());
+            cursor = page.events_next_cursor;
+        }
+        assert_eq!(
+            resumed_events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            complete
+                .events
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>()
+        );
+
+        for suffix in [
+            "?limit=0",
+            "?limit=5001",
+            "?cursor=invalid-cursor",
+            "?cursor=%FF",
+            "?limit=1&unexpected=1",
+        ] {
+            let response = client
+                .get(format!(
+                    "{root}/transactions/{transaction_id}/bundle{suffix}"
+                ))
+                .bearer_auth(&*instance.token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "bundle query {suffix} must fail closed"
+            );
+        }
+        server.abort();
+    }
 }

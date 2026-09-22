@@ -126,6 +126,10 @@ describe("VeyraClient", () => {
       transactionId: "transaction/id",
     });
     await client.recoveryActionPage({ limit: 10, cursor: "recovery-cursor" });
+    await client.getTransactionBundle("tx/bundle", {
+      limit: 500,
+      cursor: "7",
+    });
 
     expect(fetch.mock.calls[0]![0].toString()).toBe(
       "http://127.0.0.1:7843/v1/transactions/page?limit=25&cursor=opaque%2B%2F%3D",
@@ -135,6 +139,9 @@ describe("VeyraClient", () => {
     );
     expect(fetch.mock.calls[2]![0].toString()).toBe(
       "http://127.0.0.1:7843/v1/recovery/page?limit=10&cursor=recovery-cursor",
+    );
+    expect(fetch.mock.calls[3]![0].toString()).toBe(
+      "http://127.0.0.1:7843/v1/transactions/tx%2Fbundle/bundle?limit=500&cursor=7",
     );
     expect(fetch.mock.calls[0]![0].toString()).not.toContain(TOKEN);
   });
@@ -153,6 +160,9 @@ describe("VeyraClient", () => {
     expect(() => client.auditEventPage({ cursor: "bad\ncursor" })).toThrow(
       "cursor is malformed",
     );
+    expect(() =>
+      client.getTransactionBundle("tx", { cursor: "bad\ncursor" }),
+    ).toThrow("cursor is malformed");
     expect(fetch).not.toHaveBeenCalled();
   });
 

@@ -160,6 +160,33 @@ function ControlPlane({ client }: { client: VeyraClient }) {
     }
   }, [auditCursor, client]);
 
+  const loadMoreBundleEvents = useCallback(async () => {
+    if (bundle === null || bundle.events_next_cursor === null) return;
+    const id = bundle.transaction.id;
+    const request = bundleRequestRef.current;
+    setBusy("Loading later events");
+    setError(null);
+    try {
+      const next = await client.getTransactionBundle(id, {
+        cursor: bundle.events_next_cursor,
+      });
+      if (
+        request === bundleRequestRef.current &&
+        selectedIdRef.current === id
+      ) {
+        setBundle((current) =>
+          current === null || current.transaction.id !== id
+            ? current
+            : { ...next, events: appendUnique(current.events, next.events) },
+        );
+      }
+    } catch (caught: unknown) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy(null);
+    }
+  }, [bundle, client]);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("veyra.theme", theme);
@@ -416,6 +443,7 @@ function ControlPlane({ client }: { client: VeyraClient }) {
                   bundle.transaction.id,
                 )
               }
+              onLoadMoreEvents={() => void loadMoreBundleEvents()}
             />
           )}
         </main>
@@ -518,6 +546,7 @@ function TransactionInspector({
   onApprove,
   onRun,
   onRollback,
+  onLoadMoreEvents,
 }: {
   bundle: TransactionBundle;
   busy: boolean;
@@ -526,6 +555,7 @@ function TransactionInspector({
   onApprove: (requestId: string) => void;
   onRun: () => void;
   onRollback: () => void;
+  onLoadMoreEvents: () => void;
 }) {
   const transaction = bundle.transaction;
   const pendingApproval = bundle.approval_requests.find(
@@ -615,9 +645,18 @@ function TransactionInspector({
           <PanelHeading
             eyebrow="Causality"
             title="Execution timeline"
-            meta={`${bundle.events.length} events`}
+            meta={`${bundle.events.length} events${bundle.events_next_cursor !== null ? ", more available" : ""}`}
           />
           <Timeline events={bundle.events} />
+          {bundle.events_next_cursor !== null && (
+            <button
+              className="pagination-button"
+              disabled={busy}
+              onClick={onLoadMoreEvents}
+            >
+              Load later events
+            </button>
+          )}
         </section>
       </div>
 

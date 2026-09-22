@@ -562,15 +562,20 @@ pub struct TransactionBundle {
     pub verifications: Vec<Verification>,
     /// Recovery attempts.
     pub compensations: Vec<Compensation>,
-    /// Causal, redacted audit timeline.
+    /// Causal, redacted audit timeline in ascending sequence order, bounded to one page.
     pub events: Vec<AuditEvent>,
+    /// Opaque cursor continuing `events` through the same endpoint, absent when complete.
+    #[serde(default)]
+    pub events_next_cursor: Option<String>,
 }
 
 async fn get_transaction_bundle(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    Query(query): Query<PageQuery>,
 ) -> Result<Json<TransactionBundle>, ApiError> {
     let transaction_id = parse_id(&id, "transaction")?;
+    let limit = page_limit(query.limit, 1_000, 5_000)?;
     let journal = state.kernel.journal();
     let bundle = journal.read_snapshot(|snapshot| {
         let transaction = snapshot.transaction(transaction_id)?;
@@ -584,6 +589,8 @@ async fn get_transaction_bundle(
         };
         let policy_decisions =
             snapshot.objects_for_effects("policy_decision", &transaction.effect_ids)?;
+        let events =
+            snapshot.audit_event_page(Some(transaction_id), limit, query.cursor.as_deref())?;
         Ok(TransactionBundle {
             transaction,
             intent,
@@ -596,7 +603,8 @@ async fn get_transaction_bundle(
             receipts: snapshot.objects_for_transaction("receipt", transaction_id)?,
             verifications: snapshot.objects_for_transaction("verification", transaction_id)?,
             compensations: snapshot.objects_for_transaction("compensation", transaction_id)?,
-            events: snapshot.export_events(Some(transaction_id))?,
+            events: events.items,
+            events_next_cursor: events.next_cursor,
         })
     })?;
     Ok(Json(bundle))

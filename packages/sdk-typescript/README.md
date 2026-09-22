@@ -27,6 +27,9 @@ do {
 } while (cursor !== undefined);
 ```
 
+`getTransactionBundle` bounds its ascending `events` timeline the same way; keep calling it with the
+returned `events_next_cursor` until it is `null` when the full causal history is required.
+
 Treat the token as an administrative root credential. Do not give it to a model, log it, embed it in
 a web deployment, or send it to a non-loopback origin. The client rejects URL credentials,
 query/fragment-bearing base URLs and redirects; it also bounds request/response sizes, defaults to a

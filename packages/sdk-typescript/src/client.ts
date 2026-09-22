@@ -141,8 +141,13 @@ export class VeyraClient {
     return this.#request(`transactions/${encodeURIComponent(id)}`);
   }
 
-  getTransactionBundle(id: string): Promise<TransactionBundle> {
-    return this.#request(`transactions/${encodeURIComponent(id)}/bundle`);
+  getTransactionBundle(
+    id: string,
+    options: PageOptions = {},
+  ): Promise<TransactionBundle> {
+    return this.#request(
+      pagePath(`transactions/${encodeURIComponent(id)}/bundle`, options),
+    );
   }
 
   previewTransaction(id: string): Promise<PreviewOutcome> {

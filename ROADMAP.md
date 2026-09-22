@@ -23,8 +23,8 @@ execution boundary take priority over adapter count.
 - OS keychain integration and stronger local token lifecycle
 - Per-client agent/operator credentials and cryptographic human approval identity
 - Policy-driven retention and garbage collection for durable filesystem staging artifacts
-- Cursor pagination/streaming for the remaining per-transaction bundle path and high-volume audit
-  verification; transaction, audit-event/export, and recovery list pages are implemented
+- Cursor pagination/streaming for high-volume audit verification; transaction, audit-event/export,
+  recovery, and per-transaction bundle event pages are implemented
 - A versioned precondition-evaluation contract; V0.1 deliberately rejects non-empty preconditions
 - An authenticated audit anchor outside SQLite or optional remote transparency sink
 - ~~First-class MCP interception example and A2A receipt exchange example~~ — delivered as runnable
