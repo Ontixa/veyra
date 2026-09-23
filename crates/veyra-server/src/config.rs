@@ -16,7 +16,7 @@ use veyra_core::{
 };
 use veyra_executor::{
     AdapterError, AdapterRegistry, DenySecretResolver, FilesystemAdapter, FilesystemConfig,
-    HttpAdapter, HttpAdapterConfig, ProcessAdapter, ProcessAdapterConfig,
+    HttpAdapter, HttpAdapterConfig, ProcessAdapter, ProcessAdapterConfig, StagingRetentionPolicy,
 };
 use veyra_journal::{Journal, JournalError};
 use veyra_policy::{PolicyConfig, PolicyEngine};
@@ -35,6 +35,9 @@ pub struct RuntimeConfig {
     pub maximum_file_bytes: usize,
     /// Maximum structured diff bytes stored in an approval preview.
     pub maximum_diff_bytes: usize,
+    /// Retention policy for durable staging artifacts, swept once at startup after restart
+    /// recovery. `None` keeps every staging artifact forever (the pre-GC behavior).
+    pub staging_retention: Option<StagingRetentionPolicy>,
     /// Model-independent planner implementation. Fixture mode is the safe offline default.
     pub planner: PlannerRuntimeConfig,
 }
@@ -48,6 +51,7 @@ impl RuntimeConfig {
             workspace_name: "default".into(),
             maximum_file_bytes: 256 * 1024,
             maximum_diff_bytes: 256 * 1024,
+            staging_retention: Some(StagingRetentionPolicy::default()),
             planner: PlannerRuntimeConfig::Fixture,
         }
     }
@@ -119,6 +123,29 @@ pub fn prepare_instance(config: &RuntimeConfig) -> Result<PreparedInstance, Serv
     )?;
     let kernel = build_kernel(config, journal)?;
     kernel.recover_after_restart()?;
+    if let Some(policy) = &config.staging_retention {
+        // Retention failure must never block startup: the sweep is journaled inside the
+        // kernel, and a failed or skipped run simply retains artifacts until the next start.
+        match kernel.collect_staging(policy) {
+            Ok(reports) => {
+                for report in reports {
+                    if report.examined > 0 || !report.collections.is_empty() {
+                        tracing::info!(
+                            adapter = %report.adapter,
+                            examined = report.examined,
+                            collected = report.collections.len(),
+                            bytes_reclaimed = report.bytes_reclaimed,
+                            anomalies = report.anomalies.len(),
+                            "staging retention sweep finished"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "staging retention sweep failed; artifacts retained");
+            }
+        }
+    }
     let token_path = config.token_path();
     let token = Arc::<str>::from(load_or_create_token(&token_path)?);
     Ok(PreparedInstance {
@@ -442,6 +469,115 @@ mod tests {
             veyra_protocol::TransactionState::ManualRecovery
         );
         assert!(recovered.manual_recovery_reason.is_some());
+    }
+
+    #[test]
+    fn startup_sweep_collects_aged_final_staging_and_is_journaled() {
+        let temporary = TempDir::new().unwrap();
+        let mut config = RuntimeConfig::new(
+            temporary.path().join("data"),
+            temporary.path().join("workspace"),
+        );
+        config.staging_retention = Some(StagingRetentionPolicy {
+            minimum_terminal_age: chrono::Duration::zero(),
+            ..StagingRetentionPolicy::default()
+        });
+        let now = chrono::Utc::now();
+        let rolled_back = veyra_protocol::Transaction {
+            schema_version: veyra_protocol::PROTOCOL_VERSION.into(),
+            id: veyra_protocol::TransactionId::new(),
+            intent_id: veyra_protocol::IntentId::new(),
+            plan_id: veyra_protocol::PlanId::new(),
+            state: veyra_protocol::TransactionState::RolledBack,
+            effect_ids: vec![],
+            receipt_ids: vec![],
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+            manual_recovery_reason: None,
+        };
+        let recoverable = veyra_protocol::Transaction {
+            id: veyra_protocol::TransactionId::new(),
+            state: veyra_protocol::TransactionState::ManualRecovery,
+            manual_recovery_reason: Some("test".into()),
+            ..rolled_back.clone()
+        };
+        {
+            let instance = prepare_instance(&config).unwrap();
+            instance
+                .kernel
+                .journal()
+                .create_transaction(&rolled_back)
+                .unwrap();
+            instance
+                .kernel
+                .journal()
+                .create_transaction(&recoverable)
+                .unwrap();
+            for transaction_id in [rolled_back.id, recoverable.id] {
+                let directory = config
+                    .workspace_root
+                    .join(".veyra/staging")
+                    .join(transaction_id.to_string());
+                fs::create_dir_all(directory.join("evidence")).unwrap();
+                fs::write(directory.join("evidence/prepared"), b"staged").unwrap();
+            }
+        }
+
+        let reopened = prepare_instance(&config).unwrap();
+
+        assert!(
+            !config
+                .workspace_root
+                .join(".veyra/staging")
+                .join(rolled_back.id.to_string())
+                .exists()
+        );
+        assert!(
+            config
+                .workspace_root
+                .join(".veyra/staging")
+                .join(recoverable.id.to_string())
+                .exists(),
+            "recoverable transaction staging must survive the startup sweep"
+        );
+        let page = reopened
+            .kernel
+            .journal()
+            .recent_audit_event_page(None, 10_000, None)
+            .unwrap();
+        assert!(
+            page.items
+                .iter()
+                .any(|event| event.event_type == "staging.collected"
+                    && event.transaction_id == Some(rolled_back.id))
+        );
+        assert!(
+            page.items
+                .iter()
+                .any(|event| event.event_type == "staging.sweep_completed")
+        );
+    }
+
+    #[test]
+    fn disabled_staging_retention_keeps_every_artifact() {
+        let temporary = TempDir::new().unwrap();
+        let mut config = RuntimeConfig::new(
+            temporary.path().join("data"),
+            temporary.path().join("workspace"),
+        );
+        config.staging_retention = None;
+        let transaction_id = veyra_protocol::TransactionId::new();
+        let staged = config
+            .workspace_root
+            .join(".veyra/staging")
+            .join(transaction_id.to_string());
+        fs::create_dir_all(&staged).unwrap();
+        fs::write(staged.join("prepared"), b"staged").unwrap();
+
+        let _instance = prepare_instance(&config).unwrap();
+
+        assert!(staged.join("prepared").exists());
     }
 
     #[cfg(unix)]

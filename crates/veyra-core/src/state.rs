@@ -78,6 +78,35 @@ impl StateMachine {
         Ok(())
     }
 
+    /// Whether the state has no outgoing edge, so it can never stage, execute, verify, or
+    /// recover again.
+    ///
+    /// This is stricter than `TransactionState::is_terminal`: `committed`, `failed`, and
+    /// `manual_recovery` still reach `compensating`, so they are terminal-but-not-final and
+    /// their recovery artifacts must be retained. The answer is derived from the transition
+    /// graph itself, so a future edge automatically disqualifies a state.
+    pub fn is_final(state: TransactionState) -> bool {
+        const ALL: [TransactionState; 16] = [
+            TransactionState::Draft,
+            TransactionState::Planned,
+            TransactionState::Preflighted,
+            TransactionState::AwaitingApproval,
+            TransactionState::Approved,
+            TransactionState::Staged,
+            TransactionState::Executing,
+            TransactionState::Verifying,
+            TransactionState::Committed,
+            TransactionState::Denied,
+            TransactionState::Failed,
+            TransactionState::Compensating,
+            TransactionState::RolledBack,
+            TransactionState::PartiallyCompensated,
+            TransactionState::Cancelled,
+            TransactionState::ManualRecovery,
+        ];
+        !ALL.iter().any(|next| Self::allows(state, *next))
+    }
+
     /// Move a transaction to manual recovery and record a safe explanation.
     ///
     /// # Errors
@@ -198,6 +227,33 @@ mod tests {
             Err(TransitionError::RevisionConflict { .. })
         ));
         assert_eq!(tx, original);
+    }
+
+    #[test]
+    fn only_true_sinks_are_final() {
+        for state in STATES {
+            let expected = matches!(
+                state,
+                TransactionState::Denied
+                    | TransactionState::RolledBack
+                    | TransactionState::PartiallyCompensated
+                    | TransactionState::Cancelled
+            );
+            assert_eq!(
+                StateMachine::is_final(state),
+                expected,
+                "{state:?} finality must match the transition graph sinks"
+            );
+        }
+        // Committed, failed, and manual-recovery transactions can still reach
+        // compensating, so their staging artifacts are never collectible.
+        for state in [
+            TransactionState::Committed,
+            TransactionState::Failed,
+            TransactionState::ManualRecovery,
+        ] {
+            assert!(!StateMachine::is_final(state));
+        }
     }
 
     proptest! {

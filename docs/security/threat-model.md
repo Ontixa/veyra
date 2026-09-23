@@ -36,7 +36,7 @@ cryptographically authenticate separate human clients. A planner must never rece
 | Confused deputy / capability escalation  | Grants bind principal plus optional intent/transaction, adapter, operation, structured resource, constraints, expiry, nonce, and uses                                                                                                                                                 | A deliberately broad grant is broad authority; the issuer remains responsible                                                                                |
 | Approval replay or post-preview mutation | Single-use nonce, expiry, transaction binding, canonical effect digest repeated in request/grant/execution; capability uses, nonce row, and audit evidence commit atomically per effect                                                                                               | Compromise of the human principal or local daemon is out of scope                                                                                            |
 | Path traversal                           | Clean relative paths only; capability-based root handle; structured scope comparison                                                                                                                                                                                                  | OS/filesystem implementation defects remain possible                                                                                                         |
-| Symlink/junction escape                  | Traverse each component through capability-directory handles; final opens disable symlink following; repeat at preflight, staging, execution, verification, rollback                                                                                                                  | Windows reparse-point varieties and network filesystems deserve platform-specific review                                                                     |
+| Symlink/junction escape                  | Traverse each component through capability-directory handles; final opens disable symlink following; repeat at preflight, staging, execution, verification, rollback, and the retention sweep's own bounded no-follow tree walk                                                       | Windows reparse-point varieties and network filesystems deserve platform-specific review                                                                     |
 | TOCTOU                                   | Digest staged observations, atomically capture mutation sources, recheck captured bytes, and commit destinations with no-replace hard links                                                                                                                                           | A same-account process with another open handle/hard link can mutate an inode after a check; OS-call races may force conservative failure or manual recovery |
 | Duplicate execution after retry          | Unique durable idempotency reservation and serialized transaction operation; completion binds an authenticated receipt for the exact effect digest; stored result returned once known                                                                                                 | Crash after external effect but before durable outcome is unknowable and enters manual recovery                                                              |
 | Crash in any phase                       | WAL/FULL durability, revisioned snapshots, staged evidence, phase classification, conservative resume rules                                                                                                                                                                           | Filesystem/drive lies about durability and host-wide rollback are out of scope                                                                               |
@@ -76,8 +76,17 @@ restoration produces the honest `partially_compensated` outcome.
   journal before writing, records a non-overwritten backup, and fails closed on unsupported or
   corrupt schema versions; keep the backup until the migrated journal verifies cleanly.
 - Treat `manual_recovery` as an incident requiring external observation, not a retry button.
-- Protect and budget the workspace's reserved `.veyra/staging` tree. V0.1 retains restoration
-  artifacts so committed work remains rollback-capable and does not yet implement retention/GC.
+- Protect and budget the workspace's reserved `.veyra/staging` tree. A bounded, journaled
+  retention sweep runs at startup (`--disable-staging-retention` or `--staging-retention-days`
+  on the daemon, `RuntimeConfig::staging_retention` when embedding): eligibility comes only
+  from the authoritative journal and is restricted to true sink states — `denied`,
+  `rolled_back`, `cancelled`, and, when explicitly configured, `partially_compensated` — held
+  for at least the configured age. `committed`, `failed`, and `manual_recovery` artifacts are
+  never collected because those transactions can still reach `compensating`. Anything
+  malformed, unknown, unreadable, or ambiguous is retained and reported as an anomaly, so a
+  failed sweep errs toward keeping evidence. Deletion is permanent: reclaiming a
+  `partially_compensated` tree destroys the last copy of manual-recovery evidence, so
+  operators should size the age bound to their recovery review window.
 - Mutating filesystem effects require regular-file hard-link support inside the workspace for an
   atomic no-replace commit; unsupported filesystems fail without replacing the destination.
 

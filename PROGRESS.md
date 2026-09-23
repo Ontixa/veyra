@@ -1129,3 +1129,105 @@ unchanged and untested only insofar as migrated `manual_recovery` state is
 asserted preserved rather than re-driven through a live recovery flow.
 Protocol revision migration remains unimplemented (issue #20 stays open for
 it).
+
+## 2026-09-24 - policy-driven staging-artifact retention sweep
+
+- Delivered the roadmap item for retention and garbage collection of durable
+  filesystem staging artifacts under `.veyra/staging`. `Kernel::collect_staging`
+  computes eligibility only from authoritative journal snapshots: a transaction
+  must sit in a configured collect state that is also a true sink of the
+  transition graph (`StateMachine::is_final`) for at least the configured age.
+  `committed`, `failed`, and `manual_recovery` can still reach `compensating`,
+  so their recovery evidence is never collectible; `partially_compensated` is a
+  sink but excluded from the default policy because its tree is the last copy
+  of manual-recovery evidence.
+- `EffectAdapter` gained a `collect_staging` boundary receiving a
+  journal-authenticated eligibility map, the policy, and the sweep instant; the
+  default reports no durable staging. The filesystem adapter enumerates only
+  `.veyra/staging` through capability handles, requires canonical transaction
+  directory names, re-checks entry kinds before touching them, measures each
+  tree under depth (16) and entry (4,096) bounds, deletes bottom-up through
+  held `Dir` handles without ever following links, and treats every malformed,
+  unknown, unreadable, raced, or ambiguous entry as a retained anomaly. Sweeps
+  are deterministic (oldest terminal state first, transaction id tie-break),
+  bounded per run (root enumeration 65,536; policy transaction count and strict
+  byte budget), and journaled (`staging.sweep_started`, per-tree
+  `staging.collected`, `staging.sweep_completed` with bounded anomaly detail).
+  `dry_run` reports without deleting; a repeated sweep is a no-op.
+- The daemon runs one sweep in `prepare_instance` after restart recovery and
+  before serving; a sweep failure journals the error and retains everything.
+  Runtime configuration is `RuntimeConfig::staging_retention`; daemon flags are
+  `--staging-retention-days` (default 7, clamped to 1,000,000) and
+  `--disable-staging-retention`.
+- New coverage: executor tests for eligible/too-young/unknown retention,
+  noncanonical and non-directory entries, deterministic ordering under the
+  transaction bound, dry-run, and a Unix-only link-escape test; kernel tests
+  for recoverable/committed/manual-recovery survival, non-final and unbounded
+  policy rejection, idempotent repeat sweeps, dry-run audit shape, and opt-in
+  `partially_compensated` collection; server tests for startup collection,
+  recoverable survival, and disabled retention. Evals EV-065 through EV-069
+  cover the same adversarial surface.
+- Docs updated: `ROADMAP.md` marks the item delivered; `CHANGELOG.md` records
+  the user-visible behavior and flags; `docs/security/threat-model.md` extends
+  the symlink/junction controls to the sweep's no-follow walk and states the
+  permanent-evidence-loss caveat for `partially_compensated`;
+  `docs/contributing/adapter-authoring.md` documents the collection contract;
+  `docs/api-cli-reference.md` documents the daemon flags and startup ordering.
+
+Verification on this Windows host (GNU Rust 1.98.1; MSVC absent as documented):
+
+```text
+cargo +stable-x86_64-pc-windows-gnu fmt --all -- --check
+cargo +stable-x86_64-pc-windows-gnu clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo +stable-x86_64-pc-windows-gnu test --workspace --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo +stable-x86_64-pc-windows-gnu doc --workspace --all-features --no-deps --locked
+cargo +stable-x86_64-pc-windows-gnu run --locked -p veyra-protocol --example generate-schema -- packages/protocol-schema/schema
+node packages/protocol-schema/scripts/verify-generated.mjs
+git diff --exit-code -- packages/protocol-schema/schema
+cargo deny check advisories bans licenses sources --hide-inclusion-graph
+corepack pnpm install --frozen-lockfile
+corepack pnpm oss:check
+corepack pnpm release:check
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm package:check
+corepack pnpm audit --prod --audit-level high
+corepack pnpm eval
+cargo +stable-x86_64-pc-windows-gnu run --locked -p veyra-cli -- demo --json
+```
+
+Results: workspace `cargo test` passed 124 tests across 12 binaries with zero
+failures, including 7 new executor staging-sweep tests, 5 kernel retention
+tests, `state::tests::only_true_sinks_are_final`, and 3 server startup tests.
+`clippy -D warnings` and `RUSTDOCFLAGS="-D warnings" cargo doc` are clean. All
+16 generated schemas verified with no drift. `oss:check` passed 520
+assertions, `release:check` 27, `pnpm format`/`check`/`lint`/`test` clean, and
+`pnpm audit` found no vulnerabilities, `pnpm build` produced the desktop
+bundle, and `package:check` passed 7 crate and 2 npm package gates plus 67
+publication checks. `cargo deny` passed (the unused `NCSA`
+license allowance warning is pre-existing). The demo committed 1 effect,
+authenticated 1 receipt, passed 1 verification, checked 41 events (the two
+extra events are the journaled startup sweep), rolled back, and removed the
+workspace file. Evals: 67 passed, 2 environment-limited (EV-008 and the new
+Unix-only EV-069 link-descent fixture, both documented unprivileged-Windows
+symlink limitations), 0 failed.
+
+Failed runs recorded: an eval invocation while the disk was cold reported
+EV-028/EV-029 as failed because the `typescript` gate's vitest worker startup
+exceeded the documented 60-second D-drive bound; a warm rerun passed 67/0/2
+with the typescript and desktop gates green, matching the 2026-09-22
+limitation note. The GNU-linker `.rsrc` manifest warning on `veyra-desktop`
+remains pre-existing and unchanged.
+
+Residual risk: the sweep only runs at startup, so a long-lived daemon never
+reclaims newly-final artifacts until restart; per-tree measurement happens
+before deletion, and a removal failure aborts the walk and is journaled as an
+anomaly, though the partially-visited subtree may already be partly reclaimed
+for a transaction that was proven final. The workspace is still a
+same-account trust domain and a hostile writer can keep staging trees alive
+by racing the walker. Journal eligibility is a point-in-time snapshot; a
+state recorded as final cannot later resume by definition of the transition
+graph, so stale snapshots can only retain, never wrongly collect.

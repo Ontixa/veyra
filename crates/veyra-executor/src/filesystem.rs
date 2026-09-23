@@ -12,17 +12,23 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use similar::TextDiff;
 use veyra_protocol::{
-    Condition, Effect, Preview, ResourceScope, Reversibility, RiskLevel, VerificationCheck,
+    Condition, Effect, Preview, ResourceScope, Reversibility, RiskLevel, TransactionId,
+    VerificationCheck,
 };
 
 use crate::{
     AdapterContext, AdapterError, AdapterPreflight, AdapterRecovery, AdapterResult, EffectAdapter,
     StagedEffect,
+    staging::{
+        MAXIMUM_STAGE_TREE_DEPTH, MAXIMUM_STAGE_TREE_ENTRIES, MAXIMUM_SWEEP_ENTRIES,
+        StagingAnomalyKind, StagingCollection, StagingEligibility, StagingEligibilityMap,
+        StagingRetentionPolicy, StagingSweepReport,
+    },
     util::{no_secret_inputs, public_string, sha256, validate_capability_constraints},
 };
 
@@ -831,6 +837,157 @@ impl EffectAdapter for FilesystemAdapter {
             }
         }
     }
+
+    fn collect_staging(
+        &self,
+        eligible: &StagingEligibilityMap,
+        policy: &StagingRetentionPolicy,
+        now: DateTime<Utc>,
+    ) -> Result<StagingSweepReport, AdapterError> {
+        policy.validate()?;
+        let mut report = StagingSweepReport::empty(self.name(), policy.dry_run);
+        let staging = match open_directory_nofollow(&self.directory, Path::new(STAGING_DIRECTORY)) {
+            Ok(directory) => directory,
+            Err(AdapterError::Filesystem { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Ok(report);
+            }
+            Err(error) => return Err(error),
+        };
+        let candidates =
+            enumerate_staging_candidates(&staging, eligible, policy, now, &mut report)?;
+        collect_staging_candidates(&staging, candidates, policy, &mut report);
+        report.retained = report
+            .examined
+            .saturating_sub(u64::try_from(report.collections.len()).unwrap_or(u64::MAX));
+        Ok(report)
+    }
+}
+
+/// Enumerate the staging root and keep only journal-eligible candidates.
+///
+/// Eligibility is decided only from the kernel's journal-authenticated map. Every entry that
+/// cannot be positively classified as a collectible transaction directory is retained and
+/// reported as an anomaly.
+fn enumerate_staging_candidates(
+    staging: &Dir,
+    eligible: &StagingEligibilityMap,
+    policy: &StagingRetentionPolicy,
+    now: DateTime<Utc>,
+    report: &mut StagingSweepReport,
+) -> Result<Vec<(TransactionId, StagingEligibility, String)>, AdapterError> {
+    let entries = staging.entries().map_err(|error| {
+        fs_error(
+            "enumerate staging root",
+            Path::new(STAGING_DIRECTORY),
+            error,
+        )
+    })?;
+    let mut candidates = Vec::new();
+    for result in entries {
+        if usize::try_from(report.examined).unwrap_or(usize::MAX) >= MAXIMUM_SWEEP_ENTRIES {
+            report.record_anomaly("<root>", StagingAnomalyKind::EnumerationFailed);
+            break;
+        }
+        let Ok(entry) = result else {
+            report.record_anomaly("<root>", StagingAnomalyKind::EnumerationFailed);
+            break;
+        };
+        report.examined += 1;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            report.record_anomaly("[non-unicode]", StagingAnomalyKind::UnrecognizedName);
+            continue;
+        };
+        // Staging directories are always named by the canonical hyphenated identifier.
+        let Ok(transaction_id) = name.parse::<TransactionId>() else {
+            report.record_anomaly(name, StagingAnomalyKind::UnrecognizedName);
+            continue;
+        };
+        if transaction_id.to_string() != name {
+            report.record_anomaly(name, StagingAnomalyKind::UnrecognizedName);
+            continue;
+        }
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() && !kind.is_symlink() => {}
+            _ => {
+                report.record_anomaly(name, StagingAnomalyKind::UnexpectedKind);
+                continue;
+            }
+        }
+        let Some(eligibility) = eligible.get(&transaction_id).copied() else {
+            continue;
+        };
+        if now.signed_duration_since(eligibility.terminal_since) < policy.minimum_terminal_age {
+            continue;
+        }
+        candidates.push((transaction_id, eligibility, name.to_owned()));
+    }
+    Ok(candidates)
+}
+
+/// Reclaim eligible candidates oldest-first inside the policy's per-sweep bounds.
+fn collect_staging_candidates(
+    staging: &Dir,
+    mut candidates: Vec<(TransactionId, StagingEligibility, String)>,
+    policy: &StagingRetentionPolicy,
+    report: &mut StagingSweepReport,
+) {
+    // Oldest terminal state first; the identifier tie-break makes ordering total and
+    // reproducible even when two transactions share a timestamp.
+    candidates.sort_by_key(|(transaction_id, eligibility, _)| {
+        (eligibility.terminal_since, *transaction_id)
+    });
+    for (transaction_id, _eligibility, name) in candidates {
+        if report.collections.len() >= policy.maximum_sweep_transactions
+            || report.bytes_reclaimed >= policy.maximum_sweep_bytes
+        {
+            report.truncated = true;
+            break;
+        }
+        // The entry was a real directory when enumerated; re-check before touching it
+        // because workspace contents are untrusted and may race the sweep.
+        match staging.symlink_metadata(&name) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                report.record_anomaly(name, StagingAnomalyKind::UnexpectedKind);
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                report.record_anomaly(name, StagingAnomalyKind::MeasurementFailed);
+                continue;
+            }
+        }
+        let mut measurement = TreeMeasurement::default();
+        if measure_staging_tree(staging, name.as_ref(), &mut measurement, 0).is_err() {
+            report.record_anomaly(name, StagingAnomalyKind::MeasurementFailed);
+            continue;
+        }
+        // The byte bound is strict: a tree that would overflow the per-sweep budget is
+        // deferred rather than partially exceeding the configured limit. A later smaller
+        // candidate may still fit, so the sweep continues instead of starving.
+        if report.bytes_reclaimed.saturating_add(measurement.bytes) > policy.maximum_sweep_bytes {
+            report.truncated = true;
+            continue;
+        }
+        if !policy.dry_run {
+            let mut removed = 0;
+            if remove_staging_tree(staging, name.as_ref(), &mut removed, 0).is_err() {
+                report.record_anomaly(name, StagingAnomalyKind::RemovalFailed);
+                continue;
+            }
+        }
+        report.collections.push(StagingCollection {
+            transaction_id,
+            bytes: measurement.bytes,
+            // `measurement` counts descendants of the transaction root; the reclaimed
+            // root directory itself is included in the reported entry count.
+            entries: measurement.entries.saturating_add(1),
+        });
+        report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(measurement.bytes);
+    }
 }
 
 impl FilesystemAdapter {
@@ -1288,6 +1445,118 @@ fn stage_directory(
     Path::new(STAGING_DIRECTORY)
         .join(transaction_id.to_string())
         .join(effect_id.to_string())
+}
+
+/// Bounded byte/entry accounting for one transaction staging tree.
+#[derive(Default)]
+struct TreeMeasurement {
+    bytes: u64,
+    entries: u64,
+}
+
+/// Measure a staging subtree through no-follow capability handles.
+///
+/// Links are counted but never descended; exceeding the depth or entry bounds fails closed
+/// so the caller retains the tree rather than guessing at its contents.
+fn measure_staging_tree(
+    parent: &Dir,
+    name: &std::ffi::OsStr,
+    measurement: &mut TreeMeasurement,
+    depth: usize,
+) -> Result<(), AdapterError> {
+    if depth >= MAXIMUM_STAGE_TREE_DEPTH {
+        return Err(AdapterError::InvalidStage(
+            "staging tree exceeds the supported depth bound".into(),
+        ));
+    }
+    let directory = parent
+        .open_dir_nofollow(name)
+        .map_err(|error| fs_error("open staging subtree", Path::new(name), error))?;
+    for result in directory
+        .entries()
+        .map_err(|error| fs_error("enumerate staging subtree", Path::new(name), error))?
+    {
+        let entry = result
+            .map_err(|error| fs_error("enumerate staging subtree", Path::new(name), error))?;
+        measurement.entries = measurement.entries.saturating_add(1);
+        if measurement.entries > u64::try_from(MAXIMUM_STAGE_TREE_ENTRIES).unwrap_or(u64::MAX) {
+            return Err(AdapterError::InvalidStage(
+                "staging tree exceeds the supported entry bound".into(),
+            ));
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| fs_error("inspect staging entry", Path::new(name), error))?;
+        if file_type.is_dir() && !file_type.is_symlink() {
+            measure_staging_tree(&directory, &entry.file_name(), measurement, depth + 1)?;
+        } else {
+            let metadata = entry
+                .metadata()
+                .map_err(|error| fs_error("inspect staging entry", Path::new(name), error))?;
+            measurement.bytes = measurement.bytes.saturating_add(metadata.len());
+        }
+    }
+    Ok(())
+}
+
+/// Remove a staging subtree bottom-up without following links or leaving `parent`.
+///
+/// Reparse points and symlinks are unlinked in place, never descended into. Removal failure
+/// anywhere aborts the subtree: the caller records the anomaly and retains the remainder.
+fn remove_staging_tree(
+    parent: &Dir,
+    name: &std::ffi::OsStr,
+    entries: &mut u64,
+    depth: usize,
+) -> Result<(), AdapterError> {
+    if depth >= MAXIMUM_STAGE_TREE_DEPTH {
+        return Err(AdapterError::InvalidStage(
+            "staging tree exceeds the supported depth bound".into(),
+        ));
+    }
+    {
+        let directory = parent
+            .open_dir_nofollow(name)
+            .map_err(|error| fs_error("open staging subtree", Path::new(name), error))?;
+        let mut children = Vec::new();
+        for result in directory
+            .entries()
+            .map_err(|error| fs_error("enumerate staging subtree", Path::new(name), error))?
+        {
+            children.push(
+                result.map_err(|error| {
+                    fs_error("enumerate staging subtree", Path::new(name), error)
+                })?,
+            );
+            *entries = entries.saturating_add(1);
+            if *entries > u64::try_from(MAXIMUM_STAGE_TREE_ENTRIES).unwrap_or(u64::MAX) {
+                return Err(AdapterError::InvalidStage(
+                    "staging tree exceeds the supported entry bound".into(),
+                ));
+            }
+        }
+        for child in children {
+            let child_name = child.file_name();
+            let file_type = child.file_type().map_err(|error| {
+                fs_error("inspect staging entry", Path::new(&child_name), error)
+            })?;
+            if file_type.is_dir() && !file_type.is_symlink() {
+                remove_staging_tree(&directory, &child_name, entries, depth + 1)?;
+            } else if directory.remove_file(&child_name).is_err() {
+                // Directory links and junctions need `remove_dir`; neither removal primitive
+                // traverses the link, so fallback only affects the entry itself.
+                directory.remove_dir(&child_name).map_err(|error| {
+                    fs_error("remove staging entry", Path::new(&child_name), error)
+                })?;
+            }
+        }
+        // `directory` is dropped at the end of this block before `name` is removed:
+        // capability directory handles are opened without `FILE_SHARE_DELETE`, so Windows
+        // refuses to remove a directory that still has an open handle.
+    }
+    parent
+        .remove_dir(Path::new(name))
+        .map_err(|error| fs_error("remove staging directory", Path::new(name), error))
 }
 
 fn effect_content(effect: &Effect, limit: usize) -> Result<Vec<u8>, AdapterError> {
@@ -1823,5 +2092,280 @@ mod tests {
                 .await,
             Err(AdapterError::Containment(_))
         ));
+    }
+
+    fn stage_artifact(temp: &TempDir, transaction_id: TransactionId) -> std::path::PathBuf {
+        let directory = temp
+            .path()
+            .join(".veyra/staging")
+            .join(transaction_id.to_string())
+            .join(EffectId::new().to_string());
+        std::fs::create_dir_all(&directory).unwrap();
+        let artifact = directory.join("prepared");
+        std::fs::write(&artifact, b"staged bytes").unwrap();
+        artifact
+    }
+
+    fn eligibility(days: i64) -> StagingEligibility {
+        StagingEligibility {
+            state: veyra_protocol::TransactionState::RolledBack,
+            terminal_since: Utc::now() - chrono::Duration::days(days),
+        }
+    }
+
+    fn sweep_policy() -> StagingRetentionPolicy {
+        StagingRetentionPolicy {
+            minimum_terminal_age: chrono::Duration::days(7),
+            collect_states: vec![veyra_protocol::TransactionState::RolledBack],
+            maximum_sweep_transactions: 16,
+            maximum_sweep_bytes: 16 * 1024 * 1024,
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn staging_sweep_collects_only_eligible_aged_transaction_trees() {
+        let (temp, adapter) = adapter();
+        let collected = TransactionId::new();
+        let too_young = TransactionId::new();
+        let unknown = TransactionId::new();
+        stage_artifact(&temp, collected);
+        stage_artifact(&temp, too_young);
+        stage_artifact(&temp, unknown);
+        std::fs::create_dir(temp.path().join(".veyra/staging/not-a-transaction")).unwrap();
+        // A regular file named like a transaction id is never a staging tree.
+        let stray_file = TransactionId::new();
+        std::fs::write(
+            temp.path()
+                .join(".veyra/staging")
+                .join(stray_file.to_string()),
+            b"x",
+        )
+        .unwrap();
+        let mut eligible = StagingEligibilityMap::new();
+        eligible.insert(collected, eligibility(30));
+        eligible.insert(too_young, eligibility(1));
+
+        let report = adapter
+            .collect_staging(&eligible, &sweep_policy(), Utc::now())
+            .unwrap();
+
+        assert_eq!(report.collections.len(), 1);
+        assert_eq!(report.collections[0].transaction_id, collected);
+        assert_eq!(report.collections[0].bytes, 12);
+        assert!(
+            !temp
+                .path()
+                .join(".veyra/staging")
+                .join(collected.to_string())
+                .exists()
+        );
+        for retained in [&too_young, &unknown] {
+            assert!(
+                temp.path()
+                    .join(".veyra/staging")
+                    .join(retained.to_string())
+                    .exists(),
+                "non-collectible transaction staging must be retained"
+            );
+        }
+        assert!(
+            temp.path()
+                .join(".veyra/staging/not-a-transaction")
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".veyra/staging")
+                .join(stray_file.to_string())
+                .exists()
+        );
+        assert_eq!(report.examined, 5);
+        assert_eq!(report.retained, 4);
+        assert_eq!(report.anomalies.len(), 2);
+        assert!(
+            report
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == StagingAnomalyKind::UnrecognizedName)
+        );
+        assert!(
+            report
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == StagingAnomalyKind::UnexpectedKind)
+        );
+        assert!(!report.truncated);
+    }
+
+    #[test]
+    fn staging_sweep_is_deterministic_oldest_first_and_bounded() {
+        let (temp, adapter) = adapter();
+        let oldest = TransactionId::new();
+        let middle = TransactionId::new();
+        let newest = TransactionId::new();
+        stage_artifact(&temp, oldest);
+        stage_artifact(&temp, middle);
+        stage_artifact(&temp, newest);
+        let now = Utc::now();
+        let mut eligible = StagingEligibilityMap::new();
+        for (transaction_id, terminal_since) in [
+            (middle, now - chrono::Duration::days(20)),
+            (newest, now - chrono::Duration::days(8)),
+            (oldest, now - chrono::Duration::days(40)),
+        ] {
+            eligible.insert(
+                transaction_id,
+                StagingEligibility {
+                    state: veyra_protocol::TransactionState::Cancelled,
+                    terminal_since,
+                },
+            );
+        }
+        let mut policy = sweep_policy();
+        policy.maximum_sweep_transactions = 1;
+
+        let first = adapter.collect_staging(&eligible, &policy, now).unwrap();
+        assert_eq!(first.collections.len(), 1);
+        assert_eq!(first.collections[0].transaction_id, oldest);
+        assert!(first.truncated);
+        assert!(
+            temp.path()
+                .join(".veyra/staging")
+                .join(middle.to_string())
+                .exists()
+        );
+
+        let second = adapter.collect_staging(&eligible, &policy, now).unwrap();
+        assert_eq!(second.collections.len(), 1);
+        assert_eq!(second.collections[0].transaction_id, middle);
+    }
+
+    #[test]
+    fn staging_sweep_dry_run_reports_without_deleting() {
+        let (temp, adapter) = adapter();
+        let transaction_id = TransactionId::new();
+        let artifact = stage_artifact(&temp, transaction_id);
+        let mut eligible = StagingEligibilityMap::new();
+        eligible.insert(transaction_id, eligibility(30));
+        let mut policy = sweep_policy();
+        policy.dry_run = true;
+
+        let report = adapter
+            .collect_staging(&eligible, &policy, Utc::now())
+            .unwrap();
+
+        assert!(report.dry_run);
+        assert_eq!(report.collections.len(), 1);
+        assert_eq!(report.bytes_reclaimed, 12);
+        assert!(artifact.exists());
+    }
+
+    #[test]
+    fn staging_sweep_fails_closed_on_noncanonical_and_deep_trees() {
+        let (temp, adapter) = adapter();
+        let braced = TransactionId::new();
+        let deep = TransactionId::new();
+        // Brace/`urn:` forms parse as UUIDs but are never emitted by the adapter.
+        std::fs::create_dir(
+            temp.path()
+                .join(".veyra/staging")
+                .join(format!("{{{braced}}}")),
+        )
+        .unwrap();
+        let mut nested = temp.path().join(".veyra/staging").join(deep.to_string());
+        for depth in 0..20 {
+            nested = nested.join(format!("d{depth}"));
+        }
+        std::fs::create_dir_all(&nested).unwrap();
+        let mut eligible = StagingEligibilityMap::new();
+        eligible.insert(braced, eligibility(30));
+        eligible.insert(deep, eligibility(30));
+
+        let report = adapter
+            .collect_staging(&eligible, &sweep_policy(), Utc::now())
+            .unwrap();
+
+        assert!(report.collections.is_empty());
+        assert!(
+            temp.path()
+                .join(".veyra/staging")
+                .join(format!("{{{braced}}}"))
+                .exists()
+        );
+        assert!(
+            temp.path()
+                .join(".veyra/staging")
+                .join(deep.to_string())
+                .exists()
+        );
+        assert!(
+            report
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == StagingAnomalyKind::UnrecognizedName)
+        );
+        assert!(
+            report
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == StagingAnomalyKind::MeasurementFailed)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_sweep_never_descends_into_links() {
+        use std::os::unix::fs::symlink;
+
+        let (temp, adapter) = adapter();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("keep"), b"outside").unwrap();
+        let linked_tree = TransactionId::new();
+        let embedded_link = TransactionId::new();
+        // A staging-root entry that is itself a link is anomalous and retained.
+        symlink(
+            outside.path(),
+            temp.path()
+                .join(".veyra/staging")
+                .join(linked_tree.to_string()),
+        )
+        .unwrap();
+        // A link inside an otherwise collectible tree is unlinked, never traversed.
+        let artifact = stage_artifact(&temp, embedded_link);
+        symlink(
+            outside.path().join("keep"),
+            artifact.parent().unwrap().join("escape"),
+        )
+        .unwrap();
+        let mut eligible = StagingEligibilityMap::new();
+        eligible.insert(linked_tree, eligibility(30));
+        eligible.insert(embedded_link, eligibility(30));
+
+        let report = adapter
+            .collect_staging(&eligible, &sweep_policy(), Utc::now())
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(outside.path().join("keep")).unwrap(),
+            b"outside"
+        );
+        assert_eq!(report.collections.len(), 1);
+        assert_eq!(report.collections[0].transaction_id, embedded_link);
+        assert!(
+            temp.path()
+                .join(".veyra/staging")
+                .join(linked_tree.to_string())
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            report
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == StagingAnomalyKind::UnexpectedKind)
+        );
     }
 }

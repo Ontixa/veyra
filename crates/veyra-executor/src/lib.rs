@@ -4,6 +4,7 @@ mod filesystem;
 mod http;
 mod process;
 mod secret;
+mod staging;
 mod util;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -19,6 +20,11 @@ pub use filesystem::{FilesystemAdapter, FilesystemConfig};
 pub use http::{HttpAdapter, HttpAdapterConfig, HttpRule};
 pub use process::{ProcessAdapter, ProcessAdapterConfig, ProcessRule};
 pub use secret::{DenySecretResolver, EnvironmentSecretResolver, SecretResolver, SecretValue};
+pub use staging::{
+    MAXIMUM_REPORTED_ANOMALIES, MAXIMUM_STAGE_TREE_DEPTH, MAXIMUM_STAGE_TREE_ENTRIES,
+    MAXIMUM_SWEEP_ENTRIES, StagingAnomaly, StagingAnomalyKind, StagingCollection,
+    StagingEligibility, StagingEligibilityMap, StagingRetentionPolicy, StagingSweepReport,
+};
 pub use util::validate_capability_constraints;
 
 /// Immutable context supplied by the trusted kernel to every adapter call.
@@ -164,6 +170,32 @@ pub trait EffectAdapter: Send + Sync {
         staged: &StagedEffect,
         context: &AdapterContext,
     ) -> Result<AdapterRecovery, AdapterError>;
+
+    /// Reclaim durable staging artifacts the kernel classified as collectible.
+    ///
+    /// `eligible` is journal-authenticated: it maps each collectible transaction to the final
+    /// state and instant recorded by the journal. Implementations must retain every staging
+    /// entry absent from the map, malformed, unreadable, unexpected, or otherwise uncertain —
+    /// the filesystem is never authoritative for whether an artifact is still needed. All
+    /// enumeration, measurement, and deletion must stay inside `policy` bounds and inside the
+    /// adapter's own capability root. `dry_run` policies must report without deleting.
+    ///
+    /// The default implementation reports that the adapter keeps no durable staging.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] only when the sweep itself cannot run safely; per-entry
+    /// failures are reported as anomalies that retain the entry.
+    fn collect_staging(
+        &self,
+        eligible: &StagingEligibilityMap,
+        policy: &StagingRetentionPolicy,
+        now: DateTime<Utc>,
+    ) -> Result<StagingSweepReport, AdapterError> {
+        let _ = (eligible, now);
+        policy.validate()?;
+        Ok(StagingSweepReport::empty(self.name(), policy.dry_run))
+    }
 }
 
 /// Registry that lets external adapters plug in without kernel source changes.

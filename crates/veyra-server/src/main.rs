@@ -23,6 +23,12 @@ struct Arguments {
     /// Stable workspace name used in resource scopes.
     #[arg(long, default_value = "default")]
     workspace_name: String,
+    /// Disable the startup staging-retention sweep; keeps every staging artifact forever.
+    #[arg(long)]
+    disable_staging_retention: bool,
+    /// Days a transaction must sit in a collectible final state before its staging is swept.
+    #[arg(long, default_value_t = 7)]
+    staging_retention_days: u64,
     /// Enable an `OpenAI` Responses-compatible planner with this model; absent uses the fixture.
     #[arg(long)]
     planner_model: Option<String>,
@@ -51,6 +57,14 @@ async fn main() {
 async fn run(arguments: Arguments) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = RuntimeConfig::new(arguments.data_directory, arguments.workspace);
     config.workspace_name = arguments.workspace_name;
+    if arguments.disable_staging_retention {
+        config.staging_retention = None;
+    } else if let Some(policy) = &mut config.staging_retention {
+        // Clamp to roughly 2,700 years so an absurd value can never overflow the duration.
+        policy.minimum_terminal_age = chrono::Duration::days(
+            i64::try_from(arguments.staging_retention_days.min(1_000_000)).unwrap_or(1_000_000),
+        );
+    }
     if let Some(model) = arguments.planner_model {
         config.planner = PlannerRuntimeConfig::OpenAiCompatible {
             endpoint: arguments.planner_endpoint,
