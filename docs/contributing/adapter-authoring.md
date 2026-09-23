@@ -79,6 +79,26 @@ effect resource. Do not use a convenient second resource as an observation oracl
 confirm that current state is still the post-state produced by this effect. If another actor changed
 it, return `restored: false` instead of clobbering their work.
 
+If your adapter writes durable staging artifacts to disk or another store, implement
+`EffectAdapter::collect_staging` so the kernel's retention sweep can reclaim them. The kernel
+passes a journal-authenticated `eligible` map of transaction IDs whose staging may be deleted —
+restricted to states that can never stage, execute, verify, or recover again — plus a
+`StagingRetentionPolicy` with the minimum terminal age and per-sweep transaction/byte bounds.
+Your implementation must:
+
+- delete only entries positively identified by that map; retain everything else — unknown,
+  malformed, unreadable, or ambiguous entries — and report them as anomalies;
+- stay inside your own capability boundary, never follow links or ambient paths, and honor
+  the policy's bounds deterministically (oldest-terminal-state first);
+- treat `dry_run` as report-only and keep the sweep idempotent — already-deleted or vanished
+  artifacts are a no-op, not an error;
+- never infer eligibility from filesystem state, timestamps, or descriptor content alone; the
+  journal is the only authority on whether a transaction still needs its artifacts.
+
+Deleting artifacts makes the recorded reversibility claim honest only because the transaction
+can never recover again — collect nothing a `committed`, `failed`, or `manual_recovery`
+transaction might still need.
+
 ## 3. Secrets and errors
 
 Accept secret references in the protocol and resolve them as late as possible through
@@ -102,7 +122,9 @@ At minimum cover malformed shape, unknown operation and input field, risk unders
 unsupported/out-of-scope conditions, preview without mutation, TOCTOU at stage and execute,
 duplicate idempotent invocation at the system boundary, output limits, timeouts, verification
 failure, crash-safe staged-data decoding, non-clobbering rollback, partial compensation, and secret
-redaction. Property-test resource containment when it has hierarchy.
+redaction. Adapters with durable staging artifacts also cover the retention sweep: ineligible and
+unlisted entries survive, corrupt or link-shaped entries fail closed, sweep bounds hold, and a
+repeated sweep is a no-op. Property-test resource containment when it has hierarchy.
 
 Run:
 

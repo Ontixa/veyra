@@ -25,7 +25,11 @@ execution boundary take priority over adapter count.
 - Out-of-process adapter isolation and signed adapter metadata
 - OS keychain integration and stronger local token lifecycle
 - Per-client agent/operator credentials and cryptographic human approval identity
-- Policy-driven retention and garbage collection for durable filesystem staging artifacts
+- ~~Policy-driven retention and garbage collection for durable filesystem staging artifacts~~ —
+  delivered as a bounded startup sweep (`Kernel::collect_staging`): journal-derived eligibility
+  restricted to true sink states, oldest-first deterministic collection with per-sweep
+  transaction/byte bounds, fail-closed anomaly retention, and `staging.sweep_*`/`staging.collected`
+  audit events; configured via `RuntimeConfig::staging_retention` or `--staging-retention-days`
 - Cursor pagination/streaming for high-volume audit verification; transaction, audit-event/export,
   recovery, and per-transaction bundle event pages are implemented
 - A versioned precondition-evaluation contract; V0.1 deliberately rejects non-empty preconditions

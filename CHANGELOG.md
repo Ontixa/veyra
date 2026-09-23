@@ -17,6 +17,18 @@ Changelog conventions.
   inside one atomic transaction together with a `journal.schema_migrated` audit event bound to the
   new `schema_migrations` ledger, and re-verifies before committing. `verify_chain` now checks the
   migration ledger in both directions. See `docs/architecture/adr/0004-journal-schema-migration-contract.md`.
+- Added policy-driven retention and garbage collection for durable filesystem staging
+  artifacts. After restart recovery, the daemon sweeps each workspace's `.veyra/staging` tree:
+  eligibility is computed only from the authoritative journal and limited to transactions in
+  configured _final_ states (sinks of the state graph — `denied`, `rolled_back`, `cancelled`,
+  and opt-in `partially_compensated`) held for at least the configured age, so pending,
+  in-flight, recoverable, and committed-but-rollback-capable artifacts are never deleted.
+  Sweeps are deterministic (oldest first), bounded per run in transactions, bytes, depth, and
+  entries, journaled as `staging.sweep_started`/`staging.collected`/`staging.sweep_completed`
+  events, and fail closed: malformed names, unexpected kinds, unreadable or over-deep trees,
+  and unknown transactions are retained and reported as anomalies. `dry_run` reports a sweep
+  without deleting. Configure with `RuntimeConfig::staging_retention`, or the daemon flags
+  `--staging-retention-days` (default 7) and `--disable-staging-retention`.
 - Bounded the per-transaction bundle event timeline: `GET /v1/transactions/{id}/bundle` accepts
   `limit`/`cursor` and returns the ascending causal `events` page plus `events_next_cursor`
   (default 1,000, maximum 5,000). The TypeScript SDK accepts page options on

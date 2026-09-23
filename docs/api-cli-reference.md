@@ -84,12 +84,24 @@ veyra-server [--bind 127.0.0.1:7843]
              [--data-directory .veyra-data]
              [--workspace workspace]
              [--workspace-name default]
+             [--staging-retention-days 7]
+             [--disable-staging-retention]
              [--planner-model MODEL]
              [--planner-endpoint HTTPS_URL]
              [--planner-api-key-environment NAME]
 ```
 
 No model option means deterministic fixture planning. Data and workspace roots must be disjoint.
+
+At startup — after restart recovery and before serving — the daemon runs one bounded staging
+retention sweep over each workspace's `.veyra/staging` tree. Only transactions in final states
+(`denied`, `rolled_back`, `cancelled`) that have held that state for at least
+`--staging-retention-days` are collected; artifacts for pending, in-flight, recoverable, and
+committed transactions are never deleted. Every sweep and per-transaction collection is
+journaled (`staging.sweep_started`, `staging.collected`, `staging.sweep_completed`) so decisions
+are auditable. `--disable-staging-retention` preserves every staging artifact forever, and
+embedded daemons control the policy — including opting `partially_compensated` into collection
+— through `RuntimeConfig::staging_retention`.
 
 ## CLI
 

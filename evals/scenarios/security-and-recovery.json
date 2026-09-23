@@ -509,5 +509,47 @@
     "gate": "rust",
     "probe": "resource_identifiers_and_digests_require_canonical_safe_text",
     "expected": "noncanonical_input_rejected"
+  },
+  {
+    "id": "EV-065",
+    "category": "crash_recovery",
+    "title": "Staging retention never collects recoverable or unknown artifacts",
+    "gate": "rust",
+    "probe": "staging_retention_never_collects_recoverable_or_unknown_staging",
+    "expected": "recoverable_and_unknown_staging_retained"
+  },
+  {
+    "id": "EV-066",
+    "category": "crash_recovery",
+    "title": "Staging retention rejects non-final collect states and unbounded sweeps",
+    "gate": "rust",
+    "probe": "staging_retention_rejects_non_final_collect_states",
+    "expected": "non_final_policy_rejected"
+  },
+  {
+    "id": "EV-067",
+    "category": "crash_recovery",
+    "title": "Staging sweeps are bounded, idempotent, and audit-journaled",
+    "gate": "rust",
+    "probe": "staging_retention_sweep_is_bounded_and_idempotent",
+    "expected": "bounded_idempotent_journaled_sweep"
+  },
+  {
+    "id": "EV-068",
+    "category": "path_traversal",
+    "title": "Staging sweep fails closed on malformed, link-shaped, or over-deep trees",
+    "gate": "rust",
+    "probe": "staging_sweep_fails_closed_on_noncanonical_and_deep_trees",
+    "expected": "anomalous_staging_entries_retained"
+  },
+  {
+    "id": "EV-069",
+    "category": "symlink_escape",
+    "title": "Staging sweep unlinks but never descends into links",
+    "gate": "rust",
+    "probe": "staging_sweep_never_descends_into_links",
+    "expected": "link_targets_untouched",
+    "unsupported_platforms": ["win32"],
+    "environment_limitation": "The adversarial symlink fixture is Unix-only because unprivileged Windows symlink creation requires Developer Mode or elevation; lexical and canonical-name fail-closed tests still run on Windows."
   }
 ]

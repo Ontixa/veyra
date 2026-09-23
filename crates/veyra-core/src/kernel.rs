@@ -5,14 +5,15 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use veyra_executor::{
     AdapterContext, AdapterError, AdapterPreflight, AdapterRecovery, AdapterRegistry,
-    AdapterResult, StagedEffect,
+    AdapterResult, StagedEffect, StagingEligibility, StagingEligibilityMap, StagingRetentionPolicy,
+    StagingSweepReport,
 };
 use veyra_journal::{CapabilityFacts, IdempotencyReservation, Journal, JournalError};
 use veyra_policy::{CapabilityStatus, PolicyEngine, PolicyError, resource_covers};
@@ -205,6 +206,156 @@ impl Kernel {
             cursor = Some(next);
         }
         Ok(())
+    }
+
+    /// Reclaim durable adapter staging bound to transactions that can never resume or recover.
+    ///
+    /// Eligibility is computed only from the authoritative journal: a transaction's artifacts
+    /// are collectible when its recorded state is one of `policy.collect_states`, every such
+    /// state is a true sink of the transaction state graph (a state that can still reach
+    /// `compensating`, like `committed`, `failed`, or `manual_recovery`, keeps its recovery
+    /// artifacts forever), and it has been in that state for at least
+    /// `policy.minimum_terminal_age`. Pending, in-flight, recoverable, rollback-capable, and
+    /// unknown transactions are always retained, and adapters independently retain every
+    /// entry that is malformed, unreadable, or ambiguous.
+    ///
+    /// Every sweep is journaled: `staging.sweep_started` records the policy and eligible
+    /// count, one `staging.collected` event per reclaimed transaction tree, and a closing
+    /// `staging.sweep_completed` summarizes each adapter's report including its fail-closed
+    /// anomalies. A `dry_run` sweep journals the plan without deleting or emitting
+    /// `staging.collected` claims.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KernelError`] when the policy is invalid, the journal cannot be read or
+    /// audited, or an adapter refuses the sweep. Per-entry failures are retained and
+    /// reported as anomalies rather than failing the sweep.
+    pub fn collect_staging(
+        &self,
+        policy: &StagingRetentionPolicy,
+    ) -> Result<Vec<StagingSweepReport>, KernelError> {
+        let now = Utc::now();
+        let eligible = self.staging_eligibility(policy, now)?;
+        self.journal.append_event(
+            None,
+            "staging.sweep_started",
+            None,
+            json!({
+                "dry_run": policy.dry_run,
+                "minimum_terminal_age_ms": policy.minimum_terminal_age.num_milliseconds(),
+                "collect_states": policy.collect_states,
+                "maximum_sweep_transactions": policy.maximum_sweep_transactions,
+                "maximum_sweep_bytes": policy.maximum_sweep_bytes,
+                "eligible_transactions": eligible.len(),
+            }),
+        )?;
+        let mut reports = Vec::new();
+        for name in self.adapters.names() {
+            let adapter = self.adapters.get(&name)?;
+            match adapter.collect_staging(&eligible, policy, now) {
+                Ok(report) => {
+                    if !policy.dry_run {
+                        for collection in &report.collections {
+                            let eligibility = eligible.get(&collection.transaction_id);
+                            self.journal.append_event(
+                                Some(collection.transaction_id),
+                                "staging.collected",
+                                None,
+                                json!({
+                                    "adapter": report.adapter,
+                                    "transaction_id": collection.transaction_id,
+                                    "state": eligibility.map(|entry| entry.state),
+                                    "terminal_since": eligibility.map(|entry| entry.terminal_since),
+                                    "bytes": collection.bytes,
+                                    "entries": collection.entries,
+                                }),
+                            )?;
+                        }
+                    }
+                    reports.push(report);
+                }
+                Err(error) => {
+                    let _ = self.journal.append_event(
+                        None,
+                        "staging.sweep_completed",
+                        None,
+                        json!({
+                            "outcome": "adapter_error",
+                            "adapter": name,
+                            "error_code": error.code(),
+                        }),
+                    );
+                    return Err(error.into());
+                }
+            }
+        }
+        self.journal.append_event(
+            None,
+            "staging.sweep_completed",
+            None,
+            json!({
+                "outcome": if policy.dry_run { "dry_run" } else { "completed" },
+                "adapters": reports
+                    .iter()
+                    .map(|report| json!({
+                        "adapter": report.adapter,
+                        "examined": report.examined,
+                        "retained": report.retained,
+                        "collected": report.collections.len(),
+                        "bytes_reclaimed": report.bytes_reclaimed,
+                        "truncated": report.truncated,
+                        "anomalies": report.anomalies,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        )?;
+        Ok(reports)
+    }
+
+    /// Compute collectible transactions from authoritative journal state.
+    ///
+    /// Only a configured state that is also a graph sink is collectible, and only after it
+    /// has been held for the policy's minimum age. A future `updated_at` (clock skew) makes
+    /// the age negative, so skewed snapshots are retained rather than collected early.
+    fn staging_eligibility(
+        &self,
+        policy: &StagingRetentionPolicy,
+        now: DateTime<Utc>,
+    ) -> Result<StagingEligibilityMap, KernelError> {
+        policy
+            .validate()
+            .map_err(|error| KernelError::InvalidInput(error.to_string()))?;
+        for state in &policy.collect_states {
+            if !StateMachine::is_final(*state) {
+                return Err(KernelError::InvalidInput(format!(
+                    "staging retention may only collect final states; {state:?} can still recover"
+                )));
+            }
+        }
+        let mut eligible = StagingEligibilityMap::new();
+        let mut cursor = None;
+        loop {
+            let page = self.journal.transaction_page(500, cursor.as_deref())?;
+            for transaction in page.items {
+                if policy.collect_states.contains(&transaction.state)
+                    && now.signed_duration_since(transaction.updated_at)
+                        >= policy.minimum_terminal_age
+                {
+                    eligible.insert(
+                        transaction.id,
+                        StagingEligibility {
+                            state: transaction.state,
+                            terminal_since: transaction.updated_at,
+                        },
+                    );
+                }
+            }
+            let Some(next) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next);
+        }
+        Ok(eligible)
     }
 
     /// Register an immutable principal identity.
@@ -3050,5 +3201,262 @@ mod tests {
                 .is_ok_and(|transaction| transaction.state == TransactionState::Cancelled)
         }));
         assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    fn plant_staging(temp: &TempDir, transaction_id: TransactionId) -> std::path::PathBuf {
+        let directory = temp
+            .path()
+            .join("workspace/.veyra/staging")
+            .join(transaction_id.to_string());
+        std::fs::create_dir_all(directory.join("evidence")).unwrap();
+        std::fs::write(directory.join("evidence/prepared"), b"staged bytes").unwrap();
+        directory
+    }
+
+    fn journaled_transaction(state: TransactionState) -> Transaction {
+        let now = Utc::now();
+        Transaction {
+            schema_version: PROTOCOL_VERSION.into(),
+            id: TransactionId::new(),
+            intent_id: IntentId::new(),
+            plan_id: veyra_protocol::PlanId::new(),
+            state,
+            effect_ids: vec![],
+            receipt_ids: vec![],
+            revision: 0,
+            created_at: now,
+            updated_at: now,
+            manual_recovery_reason: (state == TransactionState::ManualRecovery)
+                .then(|| "test boundary".to_owned()),
+        }
+    }
+
+    fn retention_policy(age: Duration) -> StagingRetentionPolicy {
+        StagingRetentionPolicy {
+            minimum_terminal_age: age,
+            collect_states: vec![
+                TransactionState::Denied,
+                TransactionState::RolledBack,
+                TransactionState::PartiallyCompensated,
+                TransactionState::Cancelled,
+            ],
+            maximum_sweep_transactions: 16,
+            maximum_sweep_bytes: 16 * 1024 * 1024,
+            dry_run: false,
+        }
+    }
+
+    fn sweep_events(kernel: &Kernel, event_type: &str) -> Vec<veyra_protocol::AuditEvent> {
+        kernel
+            .journal()
+            .recent_audit_event_page(None, 10_000, None)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|event| event.event_type == event_type)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn staging_retention_never_collects_recoverable_or_unknown_staging() {
+        let (temp, kernel, human, agent) = kernel();
+        let submission = kernel.submit_intent(intent(&agent)).await.unwrap();
+        kernel
+            .issue_capability(human.id, &capability(&human, &agent, &submission))
+            .unwrap();
+        let preview = kernel
+            .preview_transaction(submission.transaction.id)
+            .await
+            .unwrap();
+        kernel
+            .grant_approval(preview.approval_requests[0].id, human.id)
+            .await
+            .unwrap();
+        kernel
+            .run_transaction(submission.transaction.id)
+            .await
+            .unwrap();
+        kernel
+            .rollback_transaction(submission.transaction.id)
+            .await
+            .unwrap();
+        let rolled_back = submission.transaction.id;
+        // A committed transaction keeps rollback-capable staging forever.
+        let committed = journaled_transaction(TransactionState::Committed);
+        kernel.journal().create_transaction(&committed).unwrap();
+        let committed_id = committed.id;
+        // Recoverable and in-flight states are never eligible.
+        let manual = journaled_transaction(TransactionState::ManualRecovery);
+        kernel.journal().create_transaction(&manual).unwrap();
+        let awaiting = journaled_transaction(TransactionState::AwaitingApproval);
+        kernel.journal().create_transaction(&awaiting).unwrap();
+        // A staging tree without any journaled transaction is retained.
+        let unknown = TransactionId::new();
+        for transaction_id in [rolled_back, committed_id, manual.id, awaiting.id, unknown] {
+            plant_staging(&temp, transaction_id);
+        }
+
+        let reports = kernel
+            .collect_staging(&retention_policy(Duration::zero()))
+            .unwrap();
+
+        let report = reports
+            .iter()
+            .find(|report| report.adapter == "filesystem")
+            .expect("filesystem adapter report");
+        assert_eq!(report.collections.len(), 1);
+        assert_eq!(report.collections[0].transaction_id, rolled_back);
+        for transaction_id in [committed_id, manual.id, awaiting.id, unknown] {
+            assert!(
+                temp.path()
+                    .join("workspace/.veyra/staging")
+                    .join(transaction_id.to_string())
+                    .exists(),
+                "staging for {transaction_id} must be retained"
+            );
+        }
+        assert!(
+            !temp
+                .path()
+                .join("workspace/.veyra/staging")
+                .join(rolled_back.to_string())
+                .exists()
+        );
+        let collected = sweep_events(&kernel, "staging.collected");
+        assert_eq!(collected.len(), 1);
+        assert_eq!(collected[0].transaction_id, Some(rolled_back));
+        assert_eq!(collected[0].payload["state"], json!("rolled_back"));
+        assert_eq!(sweep_events(&kernel, "staging.sweep_started").len(), 1);
+        assert_eq!(sweep_events(&kernel, "staging.sweep_completed").len(), 1);
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn staging_retention_rejects_non_final_collect_states() {
+        let (_temp, kernel, _human, _agent) = kernel();
+        for state in [
+            TransactionState::Draft,
+            TransactionState::Planned,
+            TransactionState::Committed,
+            TransactionState::Failed,
+            TransactionState::Compensating,
+            TransactionState::ManualRecovery,
+        ] {
+            let mut policy = retention_policy(Duration::zero());
+            policy.collect_states = vec![state];
+            assert!(
+                matches!(
+                    kernel.collect_staging(&policy),
+                    Err(KernelError::InvalidInput(_))
+                ),
+                "{state:?} can still recover and must never be collectible"
+            );
+        }
+        let mut empty = retention_policy(Duration::zero());
+        empty.collect_states = vec![];
+        assert!(matches!(
+            kernel.collect_staging(&empty),
+            Err(KernelError::InvalidInput(_))
+        ));
+        let mut unbounded = retention_policy(Duration::zero());
+        unbounded.maximum_sweep_transactions = 0;
+        assert!(matches!(
+            kernel.collect_staging(&unbounded),
+            Err(KernelError::InvalidInput(_))
+        ));
+        // Rejected policies never reach the sweep and journal no events.
+        assert!(sweep_events(&kernel, "staging.sweep_started").is_empty());
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn staging_retention_sweep_is_bounded_and_idempotent() {
+        let (temp, kernel, _human, _agent) = kernel();
+        let old = journaled_transaction(TransactionState::RolledBack);
+        let mut aged = old.clone();
+        aged.updated_at = Utc::now() - Duration::days(30);
+        kernel.journal().create_transaction(&aged).unwrap();
+        let fresh = journaled_transaction(TransactionState::RolledBack);
+        kernel.journal().create_transaction(&fresh).unwrap();
+        plant_staging(&temp, aged.id);
+        plant_staging(&temp, fresh.id);
+
+        // The fresh transaction is inside the default seven-day retention age.
+        let reports = kernel
+            .collect_staging(&retention_policy(Duration::days(7)))
+            .unwrap();
+        let report = &reports[0];
+        assert_eq!(report.collections.len(), 1);
+        assert_eq!(report.collections[0].transaction_id, aged.id);
+        assert!(
+            temp.path()
+                .join("workspace/.veyra/staging")
+                .join(fresh.id.to_string())
+                .exists()
+        );
+
+        // Re-running the same sweep with nothing new to collect is a journaled
+        // no-op, not a repeat delete: the reclaimed tree is already gone and the
+        // fresh transaction is still inside the retention age.
+        let second = kernel
+            .collect_staging(&retention_policy(Duration::days(7)))
+            .unwrap();
+        assert!(second[0].collections.is_empty());
+        assert_eq!(sweep_events(&kernel, "staging.collected").len(), 1);
+        assert_eq!(sweep_events(&kernel, "staging.sweep_completed").len(), 2);
+        // A zero-age sweep legitimately collects the fresh transaction now that age no
+        // longer protects it; the run after that has nothing left and stays a no-op.
+        let third = kernel
+            .collect_staging(&retention_policy(Duration::zero()))
+            .unwrap();
+        assert_eq!(third[0].collections.len(), 1);
+        assert_eq!(third[0].collections[0].transaction_id, fresh.id);
+        let fourth = kernel
+            .collect_staging(&retention_policy(Duration::zero()))
+            .unwrap();
+        assert!(fourth[0].collections.is_empty());
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn staging_retention_dry_run_journals_no_collection_claims() {
+        let (temp, kernel, _human, _agent) = kernel();
+        let transaction = journaled_transaction(TransactionState::Cancelled);
+        kernel.journal().create_transaction(&transaction).unwrap();
+        let directory = plant_staging(&temp, transaction.id);
+        let mut policy = retention_policy(Duration::zero());
+        policy.dry_run = true;
+
+        let reports = kernel.collect_staging(&policy).unwrap();
+
+        assert!(reports[0].dry_run);
+        assert_eq!(reports[0].collections.len(), 1);
+        assert!(directory.exists());
+        assert!(sweep_events(&kernel, "staging.collected").is_empty());
+        let completed = sweep_events(&kernel, "staging.sweep_completed");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].payload["outcome"], json!("dry_run"));
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn staging_retention_collects_partially_compensated_only_when_configured() {
+        let (temp, kernel, _human, _agent) = kernel();
+        let transaction = journaled_transaction(TransactionState::PartiallyCompensated);
+        kernel.journal().create_transaction(&transaction).unwrap();
+        let directory = plant_staging(&temp, transaction.id);
+
+        // The conservative default keeps last-copy manual-recovery evidence.
+        let reports = kernel
+            .collect_staging(&StagingRetentionPolicy::default())
+            .unwrap();
+        assert!(reports[0].collections.is_empty());
+        assert!(directory.exists());
+
+        let mut explicit = retention_policy(Duration::zero());
+        explicit.collect_states = vec![TransactionState::PartiallyCompensated];
+        let reports = kernel.collect_staging(&explicit).unwrap();
+        assert_eq!(reports[0].collections.len(), 1);
+        assert!(!directory.exists());
     }
 }
