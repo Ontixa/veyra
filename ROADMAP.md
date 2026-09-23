@@ -15,7 +15,10 @@ execution boundary take priority over adapter count.
 
 ## Next
 
-- Stable migration tooling for protocol and journal revisions
+- Stable migration tooling for protocol and journal revisions — the journal half is delivered as
+  the audit-bound forward-migration contract (`veyra journal migrate`,
+  `docs/architecture/adr/0004-journal-schema-migration-contract.md`); protocol revision tooling
+  remains open
   ([tracking issue #20](https://github.com/Ontixa/veyra/issues/20))
 - A supervised manual-recovery workflow with evidence capture and operator acknowledgements
   ([tracking issue #19](https://github.com/Ontixa/veyra/issues/19))

@@ -108,6 +108,14 @@ are also bound back to audit payloads and checked in both directions. A gap, reo
 missing materialized row, broken link, or anchor mismatch fails verification. Aggregate transaction
 inspection is read from one SQLite snapshot so it cannot mix revisions during a concurrent update.
 
+`metadata.schema_version` records the journal storage contract. Only the current version opens
+directly: an older supported version is refused untouched with `MigrationRequired` until an
+operator runs the explicit, offline `veyra journal migrate`, which verifies all evidence, records
+a `VACUUM INTO` backup, and applies the ordered steps inside one transaction together with an
+audit-bound `journal.schema_migrated` record in the `schema_migrations` ledger. Malformed,
+missing, or newer versions — including downgrades — fail closed. See
+[ADR-0004](adr/0004-journal-schema-migration-contract.md).
+
 On startup, transactions are normalized from their last durable phase. Planned,
 awaiting-approval, and approved work remains available through its normal guarded API. Incomplete
 draft/preflight phases terminate without side effects. Staged, executing, verifying, or compensating
