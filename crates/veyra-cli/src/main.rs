@@ -2,6 +2,7 @@
 
 use std::{io::Read as _, path::PathBuf, sync::Arc, time::Duration};
 
+use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
 use futures_util::StreamExt;
 use reqwest::{StatusCode, Url};
@@ -10,6 +11,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use veyra_journal::{Journal, JournalError};
 use veyra_protocol::{
     ApprovalRequestId, AuditVerification, Capability, IntentId, PlanId, Principal, PrincipalId,
     TransactionId,
@@ -84,6 +86,11 @@ enum Command {
         #[command(subcommand)]
         command: AuditCommand,
     },
+    /// Maintain the durable journal offline; stop the daemon before running these.
+    Journal {
+        #[command(subcommand)]
+        command: JournalCommand,
+    },
     /// Run a complete no-key create/approve/execute/verify/rollback flow.
     Demo(DemoArguments),
 }
@@ -103,6 +110,25 @@ struct DemoArguments {
     /// Persist demo state beneath this directory instead of using a temporary directory.
     #[arg(long)]
     directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum JournalCommand {
+    /// Verify, back up, and forward-migrate the durable journal database to this build's schema
+    /// version. Older supported journals are verified first and upgraded inside one atomic
+    /// transaction; unknown or newer versions fail closed without writing.
+    Migrate(JournalMigrateArguments),
+}
+
+#[derive(Debug, Args)]
+struct JournalMigrateArguments {
+    /// Durable database and local-key directory (same as `init --data-directory`).
+    #[arg(long, default_value = ".veyra-data")]
+    data_directory: PathBuf,
+    /// Pre-migration snapshot destination. Defaults to a timestamped file inside the data
+    /// directory; the path must not already exist.
+    #[arg(long)]
+    backup: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -207,6 +233,7 @@ async fn main() {
 async fn run(cli: Cli) -> Result<Value, CliError> {
     match cli.command {
         Command::Init(arguments) => initialize(arguments),
+        Command::Journal { command } => run_journal_command(command),
         Command::Demo(arguments) => run_demo(arguments).await,
         command => {
             let client = ApiClient::from_filesystem(cli.api_url, &cli.token_file)?;
@@ -226,6 +253,25 @@ fn initialize(arguments: InitArguments) -> Result<Value, CliError> {
         "token_file": instance.token_path,
         "next": "start veyra-server with matching --data-directory and --workspace paths"
     }))
+}
+
+fn run_journal_command(command: JournalCommand) -> Result<Value, CliError> {
+    match command {
+        JournalCommand::Migrate(arguments) => migrate_journal(arguments),
+    }
+}
+
+fn migrate_journal(arguments: JournalMigrateArguments) -> Result<Value, CliError> {
+    let database = arguments.data_directory.join("veyra.sqlite3");
+    let key = arguments.data_directory.join("receipt.key");
+    let backup = arguments.backup.unwrap_or_else(|| {
+        let stamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+        arguments
+            .data_directory
+            .join(format!("veyra-backup-{stamp}.sqlite3"))
+    });
+    let report = Journal::migrate(&database, &key, &backup)?;
+    serde_json::to_value(report).map_err(CliError::Json)
 }
 
 async fn run_remote(client: &ApiClient, command: Command) -> Result<Value, CliError> {
@@ -280,7 +326,7 @@ async fn run_remote(client: &ApiClient, command: Command) -> Result<Value, CliEr
                 .await
         }
         Command::Audit { command } => run_audit_command(client, command).await,
-        Command::Init(_) | Command::Demo(_) => Err(CliError::Invariant(
+        Command::Init(_) | Command::Journal { .. } | Command::Demo(_) => Err(CliError::Invariant(
             "local command reached the remote dispatcher".into(),
         )),
     }
@@ -780,6 +826,8 @@ enum CliError {
     Json(#[source] serde_json::Error),
     #[error(transparent)]
     Configuration(#[from] ServerConfigError),
+    #[error(transparent)]
+    Journal(#[from] JournalError),
     #[error("internal CLI invariant failed: {0}")]
     Invariant(String),
 }
@@ -788,6 +836,8 @@ impl CliError {
     fn exit_code(&self) -> i32 {
         match self {
             Self::Input(_) | Self::Json(_) | Self::Url(_) => 64,
+            Self::Journal(JournalError::Io { .. }) => 74,
+            Self::Journal(_) => 65,
             Self::Http(error) if error.is_connect() => 69,
             Self::Api { status, .. } if *status == StatusCode::UNAUTHORIZED => 77,
             Self::Api { status, .. } if *status == StatusCode::CONFLICT => 75,

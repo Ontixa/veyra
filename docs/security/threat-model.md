@@ -72,6 +72,9 @@ restoration produces the honest `partially_compensated` outcome.
 - Leave process execution disabled unless an exact audited use case needs it.
 - Restrict HTTP rules to the narrowest host, port, method, and path prefix.
 - Verify the journal before trusting an audit export and back up the receipt key with the database.
+- Migrate journals only with `veyra journal migrate` while the daemon is stopped. It verifies the
+  journal before writing, records a non-overwritten backup, and fails closed on unsupported or
+  corrupt schema versions; keep the backup until the migrated journal verifies cleanly.
 - Treat `manual_recovery` as an incident requiring external observation, not a retry button.
 - Protect and budget the workspace's reserved `.veyra/staging` tree. V0.1 retains restoration
   artifacts so committed work remains rollback-capable and does not yet implement retention/GC.

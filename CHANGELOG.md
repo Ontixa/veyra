@@ -7,6 +7,16 @@ Changelog conventions.
 
 ### Added
 
+- Defined the v0.2 journal storage-migration contract: `metadata.schema_version` is the durable
+  schema authority written atomically with first initialization, `Journal::open` refuses an older
+  supported version without mutating it (`JournalError::MigrationRequired`), and missing,
+  malformed, or newer versions — including downgrade attempts — fail closed
+  (`JournalError::UnsupportedSchemaVersion`). The new offline `veyra journal migrate` command (and
+  `Journal::migrate`) verifies the complete audit chain and every audit-bound durable state,
+  records a `VACUUM INTO` backup that is never overwritten, applies the ordered forward steps
+  inside one atomic transaction together with a `journal.schema_migrated` audit event bound to the
+  new `schema_migrations` ledger, and re-verifies before committing. `verify_chain` now checks the
+  migration ledger in both directions. See `docs/architecture/adr/0004-journal-schema-migration-contract.md`.
 - Bounded the per-transaction bundle event timeline: `GET /v1/transactions/{id}/bundle` accepts
   `limit`/`cursor` and returns the ascending causal `events` page plus `events_next_cursor`
   (default 1,000, maximum 5,000). The TypeScript SDK accepts page options on

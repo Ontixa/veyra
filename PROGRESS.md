@@ -1057,3 +1057,75 @@ return a refreshed snapshot on later pages (the ascending sequence keyset
 keeps the events themselves stable and deduplicated). High-volume audit
 verification still streams internally but is not resumable; that remains on
 the roadmap.
+
+## 2026-09-24 - v0.2 journal schema migration contract
+
+Implemented the journal half of roadmap issue #20 ("stable migration tooling for
+protocol and journal revisions"): an explicit, offline, audit-bound forward
+migration path for the durable SQLite journal. Protocol revision tooling remains
+open on the roadmap.
+
+- `metadata.schema_version` is now the durable storage-contract authority,
+  written atomically with first initialization (schema, version marker, and
+  audit anchors commit in one transaction). `Journal::open` only opens the
+  current version (`2`): an older supported version fails closed with
+  `JournalError::MigrationRequired` without mutation, while missing, malformed,
+  unversioned-journal-shaped, or newer versions — including every downgrade
+  attempt — fail closed with `JournalError::UnsupportedSchemaVersion`.
+- `Journal::migrate` and the offline `veyra journal migrate` command
+  (`--data-directory`, `--backup`; documented in the API/CLI reference with new
+  exit codes 65/74) run the complete verification suite first, write a
+  consistent `VACUUM INTO` backup that is never overwritten, re-open the backup
+  to prove it preserved the source version and audit head, then apply the
+  ordered pending steps from `MIGRATION_STEPS` inside one immediate transaction
+  together with a `journal.schema_migrated` audit event and
+  `schema_migrations` ledger rows bound to that event by sequence and hash.
+  Full post-migration verification runs inside the same transaction, so the
+  version bump commits only when the migrated journal verifies completely; any
+  crash or failure rolls back to a readable prior version.
+- `verify_chain` now validates the migration ledger in both directions: every
+  ledger row must reference a migration event by sequence and hash and repeat a
+  declared step; every declared step must have a bound row; and the event's
+  recorded pre-migration head/count must equal its own `previous_hash` and
+  `sequence - 1`.
+- The v1→v2 step adds only the `schema_migrations` ledger, so migrated journals
+  preserve every audit event hash, transaction snapshot, capability, consumed
+  approval nonce, immutable object, staged effect, idempotency reservation, and
+  authenticated receipt verbatim. A frozen `LEGACY_V1_SCHEMA` fixture in the
+  journal tests keeps the v0.1 layout honest.
+- Decision recorded in
+  `docs/architecture/adr/0004-journal-schema-migration-contract.md`;
+  architecture README, threat model, changelog, and roadmap updated. No
+  `veyra-executor` filesystem staging internals changed; no speculative
+  migration framework was added.
+
+Verification on this Windows host (GNU Rust 1.98.1; MSVC absent as documented):
+
+```text
+cargo +stable-x86_64-pc-windows-gnu fmt --all -- --check
+cargo +stable-x86_64-pc-windows-gnu clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo +stable-x86_64-pc-windows-gnu test --workspace --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo +stable-x86_64-pc-windows-gnu doc --workspace --all-features --no-deps
+cargo +stable-x86_64-pc-windows-gnu deny check advisories bans licenses sources --hide-inclusion-graph
+corepack pnpm oss:check
+```
+
+Results: the full workspace test run passed 122 tests across 12 binaries with
+zero failures, including 41 journal tests covering the frozen v0.1 fixture,
+refuse-then-migrate evidence preservation, corrupt/missing/newer/unversioned
+fail-closed cases, interrupted-migration rollback, tamper refusal before
+mutation, and bidirectional ledger binding, plus CLI tests for
+verify-and-backup on an initialized directory, non-overwriting backup refusal,
+and the missing-database failure. `cargo doc` built all workspace docs with
+warnings denied after one intra-doc link fix. `cargo deny` passed all four
+policies with the known unmatched-NCSA allowance warning; `oss:check` passed
+520 assertions. The host was heavily contended by concurrent unrelated builds
+during verification, extending wall-clock times but not affecting outcomes.
+
+Residual risk: migration is single-writer by contract and the daemon must be
+stopped first; there is no online/concurrent migration path. `VACUUM INTO`
+requires free disk space for a full journal copy. Recovery classification is
+unchanged and untested only insofar as migrated `manual_recovery` state is
+asserted preserved rather than re-driven through a live recovery flow.
+Protocol revision migration remains unimplemented (issue #20 stays open for
+it).

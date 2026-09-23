@@ -25,8 +25,14 @@ use veyra_protocol::{
     canonical_digest, canonical_json,
 };
 
+mod migration;
+
+pub use migration::{
+    AppliedMigrationStep, CURRENT_SCHEMA_VERSION, MINIMUM_SUPPORTED_SCHEMA_VERSION, MigrationReport,
+};
+
 const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const DATABASE_SCHEMA_VERSION: &str = "1";
+const DATABASE_SCHEMA_VERSION: &str = "2";
 const AUDIT_COUNT_KEY: &str = "audit_event_count";
 const AUDIT_HEAD_KEY: &str = "audit_head_hash";
 const SNAPSHOT_BINDING_KEY: &str = "transaction_snapshot_binding_version";
@@ -129,6 +135,14 @@ CREATE TABLE IF NOT EXISTS staged_effects (
     status TEXT NOT NULL,
     PRIMARY KEY(transaction_id, effect_id)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    from_version INTEGER NOT NULL CHECK(from_version > 0),
+    to_version INTEGER NOT NULL CHECK(to_version > from_version),
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL,
+    audit_event_sequence INTEGER NOT NULL CHECK(audit_event_sequence > 0),
+    audit_event_hash TEXT NOT NULL
+) STRICT;
 ";
 
 type HmacSha256 = Hmac<Sha256>;
@@ -146,10 +160,17 @@ impl Journal {
     ///
     /// The key is stored separately from `SQLite` so a database-only attacker cannot forge receipts.
     ///
+    /// Only journals at [`CURRENT_SCHEMA_VERSION`] open directly: an older supported schema is
+    /// refused without mutation and must first be upgraded with [`Journal::migrate`] (or
+    /// `veyra journal migrate`).
+    ///
     /// # Errors
     ///
     /// Returns [`JournalError`] if directories, key material, `SQLite` initialization, or the
-    /// existing audit chain cannot be safely read and verified.
+    /// existing audit chain cannot be safely read and verified,
+    /// [`JournalError::MigrationRequired`] when the database holds an older supported schema
+    /// version, or [`JournalError::UnsupportedSchemaVersion`] for an unknown, malformed, or newer
+    /// `schema_version` (downgrades are never supported).
     pub fn open(
         database_path: impl AsRef<Path>,
         key_path: impl AsRef<Path>,
@@ -183,8 +204,7 @@ impl Journal {
         durable: bool,
     ) -> Result<Self, JournalError> {
         initialize(&connection, durable)?;
-        let key_digest = Sha256::digest(key);
-        let key_id = format!("local-hmac-sha256:{}", encode_hex(&key_digest[..8]));
+        let key_id = receipt_key_id(&key);
         let journal = Self {
             connection: Arc::new(Mutex::new(connection)),
             receipt_key: Arc::new(key),
@@ -718,6 +738,13 @@ impl Journal {
                 error,
                 verification.events_checked,
                 "idempotency receipts",
+            );
+        }
+        if let Err(error) = migration::verify_schema_migrations(&connection) {
+            return integrity_verification_failure(
+                error,
+                verification.events_checked,
+                "schema migrations",
             );
         }
         Ok(verification)
@@ -1555,25 +1582,7 @@ impl Journal {
     ///
     /// Returns [`JournalError::ForgedReceipt`] for a mismatch, or a serialization error.
     pub fn verify_receipt(&self, receipt: &Receipt) -> Result<(), JournalError> {
-        if receipt.signer_key_id != self.receipt_key_id.as_ref()
-            || !valid_sha256_hex(&receipt.authentication)
-            || !receipt_body_has_safe_shape(receipt)
-        {
-            return Err(JournalError::ForgedReceipt);
-        }
-        let provided = decode_hex(&receipt.authentication).ok_or(JournalError::ForgedReceipt)?;
-        let mut unsigned = receipt.clone();
-        unsigned.authentication.clear();
-        let bytes = canonical_json(&unsigned).map_err(JournalError::Canonical)?;
-        let mut mac = HmacSha256::new_from_slice(self.receipt_key.as_ref())
-            .map_err(|_| JournalError::Invariant("invalid receipt key length".into()))?;
-        mac.update(&bytes);
-        let expected = mac.finalize().into_bytes();
-        if expected.as_slice().ct_eq(&provided).unwrap_u8() == 1 {
-            Ok(())
-        } else {
-            Err(JournalError::ForgedReceipt)
-        }
+        verify_receipt_with(&self.receipt_key, &self.receipt_key_id, receipt)
     }
 
     /// Classify nonterminal transactions after a daemon restart.
@@ -1702,26 +1711,7 @@ impl Journal {
     }
 
     fn verify_idempotency_receipts(&self, connection: &Connection) -> Result<(), JournalError> {
-        let mut statement = connection
-            .prepare(
-                "SELECT receipt_json FROM idempotency WHERE status = 'complete' ORDER BY adapter, key",
-            )
-            .map_err(JournalError::Database)?;
-        let mut rows = statement.query([]).map_err(JournalError::Database)?;
-        while let Some(row) = rows.next().map_err(JournalError::Database)? {
-            let serialized: Option<String> = row.get(0).map_err(JournalError::Database)?;
-            let serialized = serialized.ok_or_else(|| JournalError::Corrupt {
-                sequence: None,
-                reason: "completed idempotency reservation has no receipt".into(),
-            })?;
-            let receipt: Receipt =
-                serde_json::from_str(&serialized).map_err(|_| JournalError::Corrupt {
-                    sequence: None,
-                    reason: "completed idempotency reservation has a malformed receipt".into(),
-                })?;
-            self.verify_receipt(&receipt)?;
-        }
-        Ok(())
+        verify_idempotency_receipts_with(connection, &self.receipt_key, &self.receipt_key_id)
     }
 
     fn anchor_unbound_transaction_snapshots(&self) -> Result<(), JournalError> {
@@ -2463,6 +2453,27 @@ pub enum JournalError {
     /// Persisted state contradicted a kernel invariant.
     #[error("journal invariant failed: {0}")]
     Invariant(String),
+    /// The journal uses an older supported schema and was left untouched pending explicit
+    /// migration.
+    #[error(
+        "journal schema version {found} requires explicit migration to version {current}; stop writers, verify a backup, and run `veyra journal migrate` or `Journal::migrate`"
+    )]
+    MigrationRequired {
+        /// Detected storage schema version.
+        found: String,
+        /// Current storage schema version.
+        current: String,
+    },
+    /// The journal declares a malformed, unknown, or newer schema version.
+    #[error(
+        "journal schema version {found:?} is not supported by this build (current version {current}); the journal may have been written by a newer release and downgrades are not supported"
+    )]
+    UnsupportedSchemaVersion {
+        /// Detected storage schema version.
+        found: String,
+        /// Current storage schema version.
+        current: String,
+    },
 }
 
 fn integrity_verification_failure(
@@ -2492,7 +2503,7 @@ fn integrity_verification_failure(
     })
 }
 
-fn initialize(connection: &Connection, durable: bool) -> Result<(), JournalError> {
+fn configure_connection(connection: &Connection, durable: bool) -> Result<(), JournalError> {
     connection
         .busy_timeout(std::time::Duration::from_secs(5))
         .map_err(JournalError::Database)?;
@@ -2507,34 +2518,40 @@ fn initialize(connection: &Connection, durable: bool) -> Result<(), JournalError
     connection
         .pragma_update(None, "foreign_keys", "ON")
         .map_err(JournalError::Database)?;
-    connection
-        .execute_batch(DATABASE_SCHEMA)
-        .map_err(JournalError::Database)?;
-    let existing: Option<String> = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key = 'schema_version'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(JournalError::Database)?;
-    match existing {
-        None => {
-            connection
-                .execute(
-                    "INSERT INTO metadata(key, value) VALUES ('schema_version', ?1)",
-                    params![DATABASE_SCHEMA_VERSION],
-                )
-                .map_err(JournalError::Database)?;
+    Ok(())
+}
+
+fn initialize(connection: &Connection, durable: bool) -> Result<(), JournalError> {
+    configure_connection(connection, durable)?;
+    // Detect the stored schema version before creating anything so a legacy or foreign database
+    // is never mutated by an open. Only the current version opens; older supported versions are
+    // refused until an explicit `Journal::migrate`, and anything else fails closed.
+    match migration::schema_state(connection)? {
+        migration::SchemaState::Fresh => {}
+        migration::SchemaState::Versioned(version) => {
+            migration::ensure_openable_version(&version)?;
         }
-        Some(version) if version == DATABASE_SCHEMA_VERSION => {}
-        Some(version) => {
-            return Err(JournalError::Invariant(format!(
-                "unsupported database schema version `{version}`"
-            )));
+        migration::SchemaState::Unversioned => {
+            return Err(JournalError::UnsupportedSchemaVersion {
+                found: "<missing>".to_owned(),
+                current: DATABASE_SCHEMA_VERSION.to_owned(),
+            });
         }
     }
-    let latest: Option<(i64, String)> = connection
+    // Create the schema, version marker, and audit anchors in one transaction so a crash during
+    // first initialization leaves either no journal at all or a complete one — never a
+    // versioned-looking database with a partially applied schema.
+    let sql = connection
+        .unchecked_transaction()
+        .map_err(JournalError::Database)?;
+    sql.execute_batch(DATABASE_SCHEMA)
+        .map_err(JournalError::Database)?;
+    sql.execute(
+        "INSERT OR IGNORE INTO metadata(key, value) VALUES ('schema_version', ?1)",
+        params![DATABASE_SCHEMA_VERSION],
+    )
+    .map_err(JournalError::Database)?;
+    let latest: Option<(i64, String)> = sql
         .query_row(
             "SELECT sequence, hash FROM audit_events ORDER BY sequence DESC LIMIT 1",
             [],
@@ -2543,18 +2560,17 @@ fn initialize(connection: &Connection, durable: bool) -> Result<(), JournalError
         .optional()
         .map_err(JournalError::Database)?;
     let (count, head) = latest.unwrap_or((0_i64, GENESIS_HASH.to_owned()));
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO metadata(key, value) VALUES (?1, ?2)",
-            params![AUDIT_COUNT_KEY, count.to_string()],
-        )
-        .map_err(JournalError::Database)?;
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO metadata(key, value) VALUES (?1, ?2)",
-            params![AUDIT_HEAD_KEY, head],
-        )
-        .map_err(JournalError::Database)?;
+    sql.execute(
+        "INSERT OR IGNORE INTO metadata(key, value) VALUES (?1, ?2)",
+        params![AUDIT_COUNT_KEY, count.to_string()],
+    )
+    .map_err(JournalError::Database)?;
+    sql.execute(
+        "INSERT OR IGNORE INTO metadata(key, value) VALUES (?1, ?2)",
+        params![AUDIT_HEAD_KEY, head],
+    )
+    .map_err(JournalError::Database)?;
+    sql.commit().map_err(JournalError::Database)?;
     Ok(())
 }
 
@@ -2650,6 +2666,12 @@ fn validate_private_key_file(path: &Path) -> Result<(), JournalError> {
         }
     }
     Ok(())
+}
+
+/// Derive the public key identifier recorded on receipts for a local HMAC key.
+fn receipt_key_id(key: &[u8; 32]) -> String {
+    let key_digest = Sha256::digest(key);
+    format!("local-hmac-sha256:{}", encode_hex(&key_digest[..8]))
 }
 
 fn append_event_in_transaction(
@@ -4456,6 +4478,64 @@ fn object_binding_from_payload(payload: &Value) -> Result<(&str, &str, &str), Jo
     Ok((kind, id, digest))
 }
 
+/// Verify a receipt's key identifier and authentication tag with explicit key material.
+///
+/// Used by [`Journal::verify_receipt`] and by the migration contract, which verifies a journal
+/// before a `Journal` value for it exists.
+fn verify_receipt_with(
+    key: &[u8; 32],
+    key_id: &str,
+    receipt: &Receipt,
+) -> Result<(), JournalError> {
+    if receipt.signer_key_id != key_id
+        || !valid_sha256_hex(&receipt.authentication)
+        || !receipt_body_has_safe_shape(receipt)
+    {
+        return Err(JournalError::ForgedReceipt);
+    }
+    let provided = decode_hex(&receipt.authentication).ok_or(JournalError::ForgedReceipt)?;
+    let mut unsigned = receipt.clone();
+    unsigned.authentication.clear();
+    let bytes = canonical_json(&unsigned).map_err(JournalError::Canonical)?;
+    let mut mac = HmacSha256::new_from_slice(key)
+        .map_err(|_| JournalError::Invariant("invalid receipt key length".into()))?;
+    mac.update(&bytes);
+    let expected = mac.finalize().into_bytes();
+    if expected.as_slice().ct_eq(&provided).unwrap_u8() == 1 {
+        Ok(())
+    } else {
+        Err(JournalError::ForgedReceipt)
+    }
+}
+
+/// Verify every completed idempotency reservation's stored receipt with explicit key material.
+fn verify_idempotency_receipts_with(
+    connection: &Connection,
+    receipt_key: &[u8; 32],
+    receipt_key_id: &str,
+) -> Result<(), JournalError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT receipt_json FROM idempotency WHERE status = 'complete' ORDER BY adapter, key",
+        )
+        .map_err(JournalError::Database)?;
+    let mut rows = statement.query([]).map_err(JournalError::Database)?;
+    while let Some(row) = rows.next().map_err(JournalError::Database)? {
+        let serialized: Option<String> = row.get(0).map_err(JournalError::Database)?;
+        let serialized = serialized.ok_or_else(|| JournalError::Corrupt {
+            sequence: None,
+            reason: "completed idempotency reservation has no receipt".into(),
+        })?;
+        let receipt: Receipt =
+            serde_json::from_str(&serialized).map_err(|_| JournalError::Corrupt {
+                sequence: None,
+                reason: "completed idempotency reservation has a malformed receipt".into(),
+            })?;
+        verify_receipt_with(receipt_key, receipt_key_id, &receipt)?;
+    }
+    Ok(())
+}
+
 fn deserialize_verified_object<T: DeserializeOwned + Serialize>(
     connection: &Connection,
     kind: &str,
@@ -5981,5 +6061,714 @@ mod tests {
             Journal::open(database, key),
             Err(JournalError::Invariant(_))
         ));
+    }
+
+    // ---- journal schema migration contract ----
+
+    /// Frozen v0.1 (schema version 1) DDL used as the compatibility fixture. The v1→v2 delta is
+    /// exactly the `schema_migrations` ledger, so this is the current schema minus that table and
+    /// must never drift from what released v0.1 binaries wrote.
+    const LEGACY_V1_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS audit_events (
+    sequence INTEGER PRIMARY KEY,
+    id TEXT NOT NULL UNIQUE,
+    transaction_id TEXT,
+    event_type TEXT NOT NULL,
+    causal_parent TEXT,
+    payload_json TEXT NOT NULL,
+    previous_hash TEXT NOT NULL,
+    hash TEXT NOT NULL UNIQUE,
+    recorded_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS audit_events_transaction_idx
+    ON audit_events(transaction_id, sequence);
+CREATE INDEX IF NOT EXISTS audit_events_capability_idx
+    ON audit_events(json_extract(payload_json, '$.capability_id'), sequence);
+CREATE INDEX IF NOT EXISTS audit_events_approval_nonce_idx
+    ON audit_events(json_extract(payload_json, '$.approval_nonce'), sequence);
+CREATE INDEX IF NOT EXISTS audit_events_object_idx
+    ON audit_events(
+        json_extract(payload_json, '$.object_kind'),
+        json_extract(payload_json, '$.object_id'),
+        sequence
+    );
+CREATE INDEX IF NOT EXISTS audit_events_stage_idx
+    ON audit_events(event_type, transaction_id, json_extract(payload_json, '$.effect_id'), sequence);
+CREATE INDEX IF NOT EXISTS audit_events_idempotency_idx
+    ON audit_events(
+        event_type,
+        json_extract(payload_json, '$.idempotency_adapter'),
+        json_extract(payload_json, '$.idempotency_key'),
+        sequence
+    );
+CREATE TABLE IF NOT EXISTS objects (
+    kind TEXT NOT NULL,
+    id TEXT NOT NULL,
+    canonical_json TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(kind, id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS objects_kind_transaction_idx
+    ON objects(kind, json_extract(canonical_json, '$.transaction_id'), created_at, id);
+CREATE INDEX IF NOT EXISTS objects_kind_effect_idx
+    ON objects(kind, json_extract(canonical_json, '$.effect_id'), created_at, id);
+CREATE TABLE IF NOT EXISTS transactions (
+    id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK(revision >= 0),
+    state TEXT NOT NULL,
+    json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS transactions_state_updated_idx
+    ON transactions(state, updated_at DESC, id DESC);
+CREATE TABLE IF NOT EXISTS capabilities (
+    id TEXT PRIMARY KEY,
+    nonce TEXT NOT NULL UNIQUE,
+    json TEXT NOT NULL,
+    uses INTEGER NOT NULL DEFAULT 0 CHECK(uses >= 0),
+    revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1))
+) STRICT;
+CREATE INDEX IF NOT EXISTS capabilities_principal_idx
+    ON capabilities(json_extract(json, '$.principal_id'), id);
+CREATE TABLE IF NOT EXISTS consumed_approval_nonces (
+    nonce TEXT PRIMARY KEY,
+    grant_id TEXT NOT NULL UNIQUE,
+    consumed_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS idempotency (
+    adapter TEXT NOT NULL,
+    key TEXT NOT NULL,
+    effect_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('reserved', 'complete', 'unknown')),
+    receipt_json TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(adapter, key)
+) STRICT;
+CREATE TABLE IF NOT EXISTS staged_effects (
+    transaction_id TEXT NOT NULL,
+    effect_id TEXT NOT NULL,
+    adapter TEXT NOT NULL,
+    stage_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    PRIMARY KEY(transaction_id, effect_id)
+) STRICT;
+";
+
+    /// Durable state written into a legacy fixture so tests can prove it survives migration.
+    struct LegacyFixture {
+        transaction_id: TransactionId,
+        capability_id: CapabilityId,
+        approval_nonce: String,
+        idempotency_key: String,
+        effect_digest: String,
+        effect_id: veyra_protocol::EffectId,
+        receipt: Receipt,
+        event_hashes: Vec<String>,
+    }
+
+    /// Build a schema-version-1 database exactly as a released v0.1 binary wrote it: the frozen
+    /// v1 DDL, `schema_version` "1", audit anchors, and binding markers, populated through the
+    /// real journal write paths.
+    fn legacy_v1_database(directory: &tempfile::TempDir) -> (PathBuf, PathBuf, LegacyFixture) {
+        let database = directory.path().join("journal.sqlite3");
+        let key_path = directory.path().join("receipt.key");
+        fs::write(&key_path, [7_u8; 32]).unwrap();
+        // Mirror `load_or_create_key`: an existing receipt key must be owner-only on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let key = [7_u8; 32];
+        let connection = Connection::open(&database).unwrap();
+        configure_connection(&connection, true).unwrap();
+        connection.execute_batch(LEGACY_V1_SCHEMA).unwrap();
+        connection
+            .execute(
+                "INSERT INTO metadata(key, value) VALUES ('schema_version', '1')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO metadata(key, value) VALUES ('audit_event_count', '0')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO metadata(key, value) VALUES ('audit_head_hash', ?1)",
+                params![GENESIS_HASH],
+            )
+            .unwrap();
+        let journal = Journal {
+            connection: Arc::new(Mutex::new(connection)),
+            receipt_key: Arc::new(key),
+            receipt_key_id: Arc::from(receipt_key_id(&key)),
+        };
+        journal.anchor_unbound_transaction_snapshots().unwrap();
+        journal.anchor_unbound_capability_snapshots().unwrap();
+        journal.anchor_unbound_approval_consumptions().unwrap();
+        journal.anchor_unbound_objects().unwrap();
+        journal.anchor_unbound_stages().unwrap();
+        journal.anchor_unbound_idempotency().unwrap();
+
+        let fixture = populate_legacy_journal(&journal);
+        assert!(journal.verify_chain().unwrap().valid);
+        drop(journal);
+        (database, key_path, fixture)
+    }
+
+    /// Populate a v1-shaped journal with one of each audit-bound durable state so tests can prove
+    /// every class of evidence survives migration.
+    fn populate_legacy_journal(journal: &Journal) -> LegacyFixture {
+        let draft = transaction(TransactionState::Draft);
+        journal.create_transaction(&draft).unwrap();
+        let mut planned = draft.clone();
+        planned.state = TransactionState::Planned;
+        planned.revision = 1;
+        planned.updated_at = Utc::now();
+        journal
+            .update_transaction(&planned, "transaction.planned", None, json!({}))
+            .unwrap();
+        journal
+            .put_object(
+                "principal",
+                "legacy-principal",
+                &json!({"display_name": "Legacy", "transaction_id": planned.id}),
+            )
+            .unwrap();
+        let capability = capability(2);
+        journal
+            .store_capability(&capability, PrincipalId::new())
+            .unwrap();
+        let now = Utc::now();
+        let grant = ApprovalGrant {
+            id: ApprovalGrantId::new(),
+            request_id: veyra_protocol::ApprovalRequestId::new(),
+            transaction_id: planned.id,
+            approver_id: PrincipalId::new(),
+            effect_digest: "aa".repeat(32),
+            nonce: "legacy-approval-nonce".into(),
+            granted_at: now,
+            expires_at: now + Duration::minutes(5),
+        };
+        journal.consume_approval(&grant).unwrap();
+        let effect_id = veyra_protocol::EffectId::new();
+        journal
+            .store_stage(
+                planned.id,
+                effect_id,
+                "filesystem",
+                &json!({"restoration": "legacy-stage"}),
+            )
+            .unwrap();
+        let effect_digest = "aa".repeat(32);
+        assert_eq!(
+            journal
+                .reserve_execution("filesystem", "legacy-key", &effect_digest)
+                .unwrap(),
+            IdempotencyReservation::Acquired
+        );
+        let receipt = journal.sign_receipt(unsigned_receipt(planned.id)).unwrap();
+        journal
+            .complete_execution("filesystem", "legacy-key", &effect_digest, &receipt)
+            .unwrap();
+        let event_hashes = journal
+            .export_events(None)
+            .unwrap()
+            .iter()
+            .map(|event| event.hash.clone())
+            .collect();
+        LegacyFixture {
+            transaction_id: planned.id,
+            capability_id: capability.id,
+            approval_nonce: grant.nonce,
+            idempotency_key: "legacy-key".into(),
+            effect_digest,
+            effect_id,
+            receipt,
+            event_hashes,
+        }
+    }
+
+    fn metadata_value(database: &Path, key: &str) -> Option<String> {
+        Connection::open(database)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn table_names(database: &Path) -> Vec<String> {
+        let connection = Connection::open(database).unwrap();
+        let mut statement = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn declared_migration_chain_is_contiguous_and_lands_on_current() {
+        assert_eq!(DATABASE_SCHEMA_VERSION, CURRENT_SCHEMA_VERSION.to_string());
+        let mut at = 1_u32;
+        for step in migration::MIGRATION_STEPS {
+            assert_eq!(step.from_version, at, "migration chain must be contiguous");
+            assert!(
+                step.to_version > at,
+                "migration steps must strictly increase"
+            );
+            at = step.to_version;
+        }
+        assert_eq!(at, CURRENT_SCHEMA_VERSION);
+        assert!(
+            migration::pending_steps(CURRENT_SCHEMA_VERSION)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(migration::pending_steps(0).is_err());
+        assert!(matches!(
+            migration::pending_steps(CURRENT_SCHEMA_VERSION + 1),
+            Err(JournalError::UnsupportedSchemaVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn fresh_journals_are_created_at_the_current_schema_version() {
+        let journal = journal();
+        {
+            let connection = journal.lock().unwrap();
+            assert!(matches!(
+                migration::schema_state(&connection).unwrap(),
+                migration::SchemaState::Versioned(version)
+                    if version == CURRENT_SCHEMA_VERSION.to_string()
+            ));
+        }
+        assert!(journal.verify_chain().unwrap().valid);
+        let temporary = tempfile::TempDir::new().unwrap();
+        let database = temporary.path().join("journal.sqlite3");
+        let key = temporary.path().join("receipt.key");
+        let journal = Journal::open(&database, &key).unwrap();
+        assert!(table_names(&database).contains(&"schema_migrations".to_owned()));
+        drop(journal);
+    }
+
+    #[test]
+    fn legacy_v1_journal_is_refused_then_migrated_with_evidence_preserved() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let (database, key, fixture) = legacy_v1_database(&temporary);
+        let pre_count = fixture.event_hashes.len();
+        let backup = temporary.path().join("backup.sqlite3");
+
+        // `open` refuses the older version without mutating it, so v0.1 readers still see a valid
+        // v0.1 journal.
+        assert!(matches!(
+            Journal::open(&database, &key),
+            Err(JournalError::MigrationRequired { .. })
+        ));
+        assert_eq!(
+            metadata_value(&database, "schema_version").as_deref(),
+            Some("1")
+        );
+        assert!(!table_names(&database).contains(&"schema_migrations".to_owned()));
+        assert!(!backup.exists());
+
+        let report = Journal::migrate(&database, &key, &backup).unwrap();
+        assert_eq!(report.from_version, 1);
+        assert_eq!(report.to_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(report.applied_steps.len(), 1);
+        assert_eq!(report.applied_steps[0].from_version, 1);
+        assert_eq!(report.applied_steps[0].to_version, 2);
+        assert!(report.verified);
+        assert_eq!(report.backup_path, backup);
+        assert_eq!(
+            u64::try_from(pre_count).unwrap(),
+            report.pre_migration_audit_count
+        );
+
+        // The backup is a faithful, independently readable v0.1 snapshot.
+        assert_eq!(
+            metadata_value(&backup, "schema_version").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            metadata_value(&backup, "audit_head_hash").as_deref(),
+            Some(report.pre_migration_audit_head.as_str())
+        );
+        assert!(!table_names(&backup).contains(&"schema_migrations".to_owned()));
+
+        let journal = Journal::open(&database, &key).unwrap();
+        assert!(journal.verify_chain().unwrap().valid);
+        assert_migrated_journal_preserves_evidence(&journal, &fixture, &report);
+
+        // Re-running migration on a current journal applies no further steps but still verifies
+        // and records a fresh backup.
+        let second_backup = temporary.path().join("backup-2.sqlite3");
+        let second = Journal::migrate(&database, &key, &second_backup).unwrap();
+        assert!(second.applied_steps.is_empty());
+        assert!(second.migration_event_sequence.is_none());
+        assert_eq!(second.from_version, CURRENT_SCHEMA_VERSION);
+        assert!(second.verified);
+        assert!(second_backup.exists());
+    }
+
+    /// Prove a migrated journal preserved every pre-migration event and every class of durable
+    /// state, with the only new evidence being the bound `journal.schema_migrated` record.
+    fn assert_migrated_journal_preserves_evidence(
+        journal: &Journal,
+        fixture: &LegacyFixture,
+        report: &MigrationReport,
+    ) {
+        let events = journal.export_events(None).unwrap();
+        assert_eq!(
+            u64::try_from(events.len()).unwrap(),
+            report.audit_event_count
+        );
+        assert_eq!(
+            u64::try_from(events.len()).unwrap(),
+            report.pre_migration_audit_count + 1
+        );
+        for (event, prior_hash) in events.iter().zip(fixture.event_hashes.iter()) {
+            assert_eq!(&event.hash, prior_hash);
+        }
+        let migration_event = events.last().unwrap();
+        assert_eq!(migration_event.event_type, "journal.schema_migrated");
+        assert_eq!(
+            Some(migration_event.sequence),
+            report.migration_event_sequence
+        );
+        assert_eq!(
+            migration_event.previous_hash,
+            report.pre_migration_audit_head
+        );
+
+        // The ledger row is bound to that event by sequence and hash.
+        {
+            let connection = journal.lock().unwrap();
+            let (event_sequence, event_hash): (i64, String) = connection
+                .query_row(
+                    "SELECT audit_event_sequence, audit_event_hash FROM schema_migrations",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                u64::try_from(event_sequence).unwrap(),
+                migration_event.sequence
+            );
+            assert_eq!(event_hash, migration_event.hash);
+        }
+
+        // All durable state survived: snapshots, capabilities, approval nonces, objects, stages,
+        // and authenticated idempotency receipts.
+        assert_eq!(
+            journal.transaction(fixture.transaction_id).unwrap().state,
+            TransactionState::Planned
+        );
+        assert!(
+            journal
+                .capabilities()
+                .unwrap()
+                .iter()
+                .any(|(stored, _)| stored.id == fixture.capability_id)
+        );
+        assert!(
+            journal
+                .approval_nonce_consumed(&fixture.approval_nonce)
+                .unwrap()
+        );
+        let object: Value = journal.get_object("principal", "legacy-principal").unwrap();
+        assert_eq!(object["display_name"], "Legacy");
+        let stage: Value = journal
+            .stage(fixture.transaction_id, fixture.effect_id)
+            .unwrap();
+        assert_eq!(stage["restoration"], "legacy-stage");
+        assert_eq!(
+            journal
+                .reserve_execution(
+                    "filesystem",
+                    &fixture.idempotency_key,
+                    &fixture.effect_digest
+                )
+                .unwrap(),
+            IdempotencyReservation::Completed(Box::new(fixture.receipt.clone()))
+        );
+    }
+
+    #[test]
+    fn unknown_newer_and_missing_schema_versions_fail_closed() {
+        for declared in ["0", "3", "999", "abc", "-1", "", " 2", "2 "] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let database = temporary.path().join("journal.sqlite3");
+            let key = temporary.path().join("receipt.key");
+            let backup = temporary.path().join("backup.sqlite3");
+            {
+                let connection = Connection::open(&database).unwrap();
+                connection
+                    .execute_batch(
+                        "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO metadata(key, value) VALUES ('schema_version', ?1)",
+                        params![declared],
+                    )
+                    .unwrap();
+            }
+            assert!(matches!(
+                Journal::open(&database, &key),
+                Err(JournalError::UnsupportedSchemaVersion { .. })
+            ));
+            assert!(matches!(
+                Journal::migrate(&database, &key, &backup),
+                Err(JournalError::UnsupportedSchemaVersion { .. })
+            ));
+            // Nothing was written: the version is unchanged, no journal tables were created, and
+            // no backup exists.
+            assert_eq!(
+                metadata_value(&database, "schema_version").as_deref(),
+                Some(declared)
+            );
+            assert!(!table_names(&database).contains(&"audit_events".to_owned()));
+            assert!(!backup.exists());
+        }
+
+        // Journal-shaped content without a version marker fails closed rather than guessing.
+        let temporary = tempfile::TempDir::new().unwrap();
+        let database = temporary.path().join("journal.sqlite3");
+        let key = temporary.path().join("receipt.key");
+        {
+            let connection = Connection::open(&database).unwrap();
+            connection.execute_batch(LEGACY_V1_SCHEMA).unwrap();
+        }
+        assert!(matches!(
+            Journal::open(&database, &key),
+            Err(JournalError::UnsupportedSchemaVersion { .. })
+        ));
+        assert!(matches!(
+            Journal::migrate(&database, &key, temporary.path().join("backup.sqlite3")),
+            Err(JournalError::UnsupportedSchemaVersion { .. })
+        ));
+        assert!(!temporary.path().join("backup.sqlite3").exists());
+
+        // An absent database is an honest error, not an implicit create.
+        assert!(matches!(
+            Journal::migrate(
+                temporary.path().join("missing.sqlite3"),
+                &key,
+                temporary.path().join("other-backup.sqlite3")
+            ),
+            Err(JournalError::Invariant(_))
+        ));
+    }
+
+    #[test]
+    fn interrupted_migration_rolls_back_to_a_readable_prior_version() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let (database, key, fixture) = legacy_v1_database(&temporary);
+        let pre_head = metadata_value(&database, "audit_head_hash").unwrap();
+
+        // Simulate an interrupted/half-applied migration: the ledger object already exists, so
+        // the real step DDL must fail inside the transaction and roll back.
+        {
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .execute_batch(migration::MIGRATION_STEPS[0].statements)
+                .unwrap();
+        }
+        let backup = temporary.path().join("backup.sqlite3");
+        assert!(matches!(
+            Journal::migrate(&database, &key, &backup),
+            Err(JournalError::Database(_))
+        ));
+
+        // The rollback left the prior version fully intact and readable: the version marker,
+        // audit head, and every pre-existing event are unchanged, and no migration evidence was
+        // half-committed.
+        assert_eq!(
+            metadata_value(&database, "schema_version").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            metadata_value(&database, "audit_head_hash").as_deref(),
+            Some(pre_head.as_str())
+        );
+        {
+            let connection = Connection::open(&database).unwrap();
+            let events: i64 = connection
+                .query_row("SELECT COUNT(*) FROM audit_events", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(
+                u64::try_from(events).unwrap(),
+                u64::try_from(fixture.event_hashes.len()).unwrap()
+            );
+            let ledger_rows: i64 = connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(ledger_rows, 0);
+            let migration_events: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_events WHERE event_type = 'journal.schema_migrated'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(migration_events, 0);
+        }
+        assert!(matches!(
+            Journal::open(&database, &key),
+            Err(JournalError::MigrationRequired { .. })
+        ));
+
+        // A verified backup was still recorded before the failed write, and it is never
+        // overwritten; the retry needs a fresh path and then succeeds cleanly.
+        assert!(backup.exists());
+        assert!(matches!(
+            Journal::migrate(&database, &key, &backup),
+            Err(JournalError::Invariant(_))
+        ));
+        {
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .execute_batch("DROP TABLE schema_migrations")
+                .unwrap();
+        }
+        let retry_backup = temporary.path().join("backup-retry.sqlite3");
+        let report = Journal::migrate(&database, &key, &retry_backup).unwrap();
+        assert_eq!(report.from_version, 1);
+        assert_eq!(report.to_version, CURRENT_SCHEMA_VERSION);
+        assert!(report.verified);
+        let journal = Journal::open(&database, &key).unwrap();
+        assert!(journal.verify_chain().unwrap().valid);
+        assert_eq!(
+            journal.transaction(fixture.transaction_id).unwrap().state,
+            TransactionState::Planned
+        );
+    }
+
+    #[test]
+    fn migration_refuses_unverified_evidence_without_touching_the_journal() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let (database, key, fixture) = legacy_v1_database(&temporary);
+        {
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .execute(
+                    "UPDATE audit_events SET payload_json = '{\"tampered\":true}' WHERE sequence = 1",
+                    [],
+                )
+                .unwrap();
+        }
+        let backup = temporary.path().join("backup.sqlite3");
+        assert!(matches!(
+            Journal::migrate(&database, &key, &backup),
+            Err(JournalError::Corrupt { .. })
+        ));
+        assert!(!backup.exists());
+        assert_eq!(
+            metadata_value(&database, "schema_version").as_deref(),
+            Some("1")
+        );
+        let _ = fixture;
+    }
+
+    #[test]
+    fn migrated_ledger_is_audit_bound_in_both_directions() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let (database, key, _fixture) = legacy_v1_database(&temporary);
+        let backup = temporary.path().join("backup.sqlite3");
+        Journal::migrate(&database, &key, &backup).unwrap();
+        let journal = Journal::open(&database, &key).unwrap();
+        assert!(journal.verify_chain().unwrap().valid);
+
+        // A deleted ledger row is detected.
+        {
+            let connection = journal.lock().unwrap();
+            connection
+                .execute("DELETE FROM schema_migrations", [])
+                .unwrap();
+        }
+        assert!(!journal.verify_chain().unwrap().valid);
+
+        // A re-pointed ledger binding is detected.
+        let temporary = tempfile::TempDir::new().unwrap();
+        let (database, key, _) = legacy_v1_database(&temporary);
+        Journal::migrate(&database, &key, temporary.path().join("backup.sqlite3")).unwrap();
+        let journal = Journal::open(&database, &key).unwrap();
+        {
+            let connection = journal.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE schema_migrations SET audit_event_hash = ?1",
+                    params!["ff".repeat(32)],
+                )
+                .unwrap();
+        }
+        assert!(!journal.verify_chain().unwrap().valid);
+
+        // A deleted migration audit event breaks both the chain and the dangling ledger row.
+        let temporary = tempfile::TempDir::new().unwrap();
+        let (database, key, _) = legacy_v1_database(&temporary);
+        Journal::migrate(&database, &key, temporary.path().join("backup.sqlite3")).unwrap();
+        let journal = Journal::open(&database, &key).unwrap();
+        {
+            let connection = journal.lock().unwrap();
+            connection
+                .execute(
+                    "DELETE FROM audit_events WHERE event_type = 'journal.schema_migrated'",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE metadata SET value = ?1 WHERE key = 'audit_head_hash'",
+                    params![GENESIS_HASH],
+                )
+                .unwrap();
+        }
+        assert!(!journal.verify_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn metadata_schema_version_is_the_migration_authority() {
+        // A database that declares version 1 but already contains the v2 ledger must still
+        // migrate through the ordered steps; the conflicting object fails the transaction
+        // closed and nothing is half-applied.
+        let temporary = tempfile::TempDir::new().unwrap();
+        let (database, key, _fixture) = legacy_v1_database(&temporary);
+        {
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .execute_batch(migration::MIGRATION_STEPS[0].statements)
+                .unwrap();
+        }
+        assert!(matches!(
+            Journal::open(&database, &key),
+            Err(JournalError::MigrationRequired { .. })
+        ));
+        assert!(matches!(
+            Journal::migrate(&database, &key, temporary.path().join("backup.sqlite3")),
+            Err(JournalError::Database(_))
+        ));
+        assert_eq!(
+            metadata_value(&database, "schema_version").as_deref(),
+            Some("1")
+        );
     }
 }

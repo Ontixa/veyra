@@ -111,12 +111,21 @@ veyra approval grant REQUEST_ID --approver PRINCIPAL_ID
 veyra capability issue FILE --issuer PRINCIPAL_ID
 veyra audit verify
 veyra audit export [--transaction TRANSACTION_ID] [--limit 1000] [--cursor OPAQUE_CURSOR]
+veyra journal migrate [--data-directory PATH] [--backup PATH]
 veyra demo [--directory PATH]
 ```
 
 `--json` emits compact JSON; otherwise output is pretty JSON. Input files must match the protocol
 schema and use already registered/bound IDs. The complete no-key path is `veyra demo --json`.
 
-Exit codes follow sysexits-style meanings: `0` success, `64` invalid input/JSON/URL, `69` daemon
-unreachable, `70` other API/software failure, `75` transaction conflict, `77` authentication failure,
-and `78` local configuration or filesystem failure.
+`veyra journal migrate` is the offline journal-schema migration path: it uses the same
+`--data-directory` as `init`/`veyra-server` (holding `veyra.sqlite3` and `receipt.key`), verifies
+the journal, writes a `VACUUM INTO` snapshot (default: a timestamped `veyra-backup-*.sqlite3`
+inside the data directory; the path must not already exist), applies the ordered forward steps in
+one atomic transaction, and prints the `MigrationReport`. Stop the daemon first; unknown or newer
+`schema_version` values — including downgrades — fail closed without writing.
+
+Exit codes follow sysexits-style meanings: `0` success, `64` invalid input/JSON/URL, `65` journal
+data refused (unsupported or corrupt schema state), `69` daemon unreachable, `70` other
+API/software failure, `74` journal I/O failure, `75` transaction conflict, `77` authentication
+failure, and `78` local configuration or filesystem failure.

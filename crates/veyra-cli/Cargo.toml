@@ -26,6 +26,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
+veyra-journal = { version = "0.1.0", path = "../veyra-journal" }
 veyra-protocol = { version = "0.1.0", path = "../veyra-protocol" }
 veyra-server = { version = "0.1.0", path = "../veyra-server" }
 
