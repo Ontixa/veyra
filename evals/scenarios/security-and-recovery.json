@@ -667,5 +667,21 @@
     "gate": "rust",
     "probe": "precondition_failed_state_has_a_stable_wire_name",
     "expected": "stable_wire_value"
+  },
+  {
+    "id": "EV-083",
+    "category": "journal_tamper",
+    "title": "An operator-held audit anchor detects a whole-database rewrite and truncation",
+    "gate": "rust",
+    "probe": "exported_anchor_detects_rewritten_journal_history",
+    "expected": "anchor_mismatch_detected"
+  },
+  {
+    "id": "EV-084",
+    "category": "journal_tamper",
+    "title": "Forged, foreign-key, malformed, or mis-pinned audit anchors fail closed",
+    "gate": "rust",
+    "probe": "forged_or_foreign_audit_anchors_are_rejected",
+    "expected": "invalid_anchor_rejected"
   }
 ]

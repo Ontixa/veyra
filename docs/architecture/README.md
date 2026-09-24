@@ -112,6 +112,10 @@ deletion. Materialized transaction, immutable-object, capability, nonce, stage, 
 are also bound back to audit payloads and checked in both directions. A gap, reorder, mutation,
 missing materialized row, broken link, or anchor mismatch fails verification. Aggregate transaction
 inspection is read from one SQLite snapshot so it cannot mix revisions during a concurrent update.
+Operators can additionally export an HMAC-authenticated `veyra.audit-anchor/v1` checkpoint that
+pins the count/head outside the database; `veyra journal anchor check` then detects a
+whole-database rewrite the local anchor cannot see. See
+[ADR-0005](adr/0005-external-audit-anchor-checkpoints.md).
 
 `metadata.schema_version` records the journal storage contract. Only the current version opens
 directly: an older supported version is refused untouched with `MigrationRequired` until an

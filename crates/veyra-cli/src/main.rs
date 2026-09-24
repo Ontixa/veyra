@@ -1,6 +1,11 @@
 //! Inspectable command-line client for the authenticated local Veyra API.
 
-use std::{io::Read as _, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    io::{Read as _, Write as _},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
@@ -11,7 +16,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use veyra_journal::{Journal, JournalError};
+use veyra_journal::{AuditAnchor, Journal, JournalError};
 use veyra_protocol::{
     ApprovalRequestId, AuditVerification, Capability, IntentId, PlanId, Principal, PrincipalId,
     TransactionId,
@@ -118,6 +123,12 @@ enum JournalCommand {
     /// version. Older supported journals are verified first and upgraded inside one atomic
     /// transaction; unknown or newer versions fail closed without writing.
     Migrate(JournalMigrateArguments),
+    /// Export or check an authenticated audit anchor checkpoint kept outside the journal
+    /// database; a stored anchor detects a whole-database rewrite the local anchor cannot.
+    Anchor {
+        #[command(subcommand)]
+        command: JournalAnchorCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -129,6 +140,38 @@ struct JournalMigrateArguments {
     /// directory; the path must not already exist.
     #[arg(long)]
     backup: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum JournalAnchorCommand {
+    /// Export an HMAC-authenticated checkpoint of the audit chain head as JSON. Store the
+    /// artifact outside the data directory — a journal rewritten after export cannot
+    /// reproduce the pinned head.
+    Export(JournalAnchorExportArguments),
+    /// Verify the journal still contains the exact audit head a previously exported anchor
+    /// pinned. Exits non-zero when the anchor no longer matches.
+    Check(JournalAnchorCheckArguments),
+}
+
+#[derive(Debug, Args)]
+struct JournalAnchorExportArguments {
+    /// Durable database and local-key directory (same as `init --data-directory`).
+    #[arg(long, default_value = ".veyra-data")]
+    data_directory: PathBuf,
+    /// Write the anchor JSON to this path instead of printing it; the file must not already
+    /// exist.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct JournalAnchorCheckArguments {
+    /// Durable database and local-key directory (same as `init --data-directory`).
+    #[arg(long, default_value = ".veyra-data")]
+    data_directory: PathBuf,
+    /// Anchor JSON produced by `veyra journal anchor export`.
+    #[arg(long)]
+    file: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -258,6 +301,70 @@ fn initialize(arguments: InitArguments) -> Result<Value, CliError> {
 fn run_journal_command(command: JournalCommand) -> Result<Value, CliError> {
     match command {
         JournalCommand::Migrate(arguments) => migrate_journal(arguments),
+        JournalCommand::Anchor { command } => match command {
+            JournalAnchorCommand::Export(arguments) => export_journal_anchor(arguments),
+            JournalAnchorCommand::Check(arguments) => check_journal_anchor(&arguments),
+        },
+    }
+}
+
+/// Open the journal in `data_directory` only when an initialized database and receipt key
+/// already exist. Anchor commands must never create state: a missing journal or key is an
+/// operator error, not a reason to mint a fresh key an exported anchor would silently sign
+/// under.
+fn open_initialized_journal(data_directory: &std::path::Path) -> Result<Journal, CliError> {
+    let database = data_directory.join("veyra.sqlite3");
+    let key = data_directory.join("receipt.key");
+    if !database.is_file() || !key.is_file() {
+        return Err(CliError::Input(format!(
+            "no initialized journal at {}; run `veyra init` first",
+            data_directory.display()
+        )));
+    }
+    Ok(Journal::open(&database, &key)?)
+}
+
+fn export_journal_anchor(arguments: JournalAnchorExportArguments) -> Result<Value, CliError> {
+    let journal = open_initialized_journal(&arguments.data_directory)?;
+    let anchor = journal.export_audit_anchor()?;
+    let Some(out) = arguments.out else {
+        return serde_json::to_value(&anchor).map_err(CliError::Json);
+    };
+    if out.exists() {
+        return Err(CliError::Input(format!(
+            "anchor output path already exists; refusing to overwrite {}",
+            out.display()
+        )));
+    }
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(CliError::Io)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&out)
+        .map_err(CliError::Io)?;
+    let bytes = serde_json::to_vec_pretty(&anchor).map_err(CliError::Json)?;
+    file.write_all(&bytes).map_err(CliError::Io)?;
+    file.write_all(b"\n").map_err(CliError::Io)?;
+    file.sync_all().map_err(CliError::Io)?;
+    Ok(json!({
+        "anchor_path": out,
+        "event_count": anchor.event_count,
+        "head_hash": anchor.head_hash,
+        "signer_key_id": anchor.signer_key_id,
+        "schema_version": anchor.schema_version,
+    }))
+}
+
+fn check_journal_anchor(arguments: &JournalAnchorCheckArguments) -> Result<Value, CliError> {
+    let journal = open_initialized_journal(&arguments.data_directory)?;
+    let anchor: AuditAnchor = read_json(&arguments.file)?;
+    let verification = journal.verify_audit_anchor(&anchor)?;
+    if verification.valid {
+        serde_json::to_value(&verification).map_err(CliError::Json)
+    } else {
+        Err(CliError::Anchor(verification.message))
     }
 }
 
@@ -828,6 +935,8 @@ enum CliError {
     Configuration(#[from] ServerConfigError),
     #[error(transparent)]
     Journal(#[from] JournalError),
+    #[error("audit anchor verification failed: {0}")]
+    Anchor(String),
     #[error("internal CLI invariant failed: {0}")]
     Invariant(String),
 }
@@ -837,7 +946,7 @@ impl CliError {
         match self {
             Self::Input(_) | Self::Json(_) | Self::Url(_) => 64,
             Self::Journal(JournalError::Io { .. }) => 74,
-            Self::Journal(_) => 65,
+            Self::Journal(_) | Self::Anchor(_) => 65,
             Self::Http(error) if error.is_connect() => 69,
             Self::Api { status, .. } if *status == StatusCode::UNAUTHORIZED => 77,
             Self::Api { status, .. } if *status == StatusCode::CONFLICT => 75,

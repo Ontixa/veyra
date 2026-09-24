@@ -68,6 +68,16 @@ Changelog conventions.
   daemon startup on Linux and Windows.
 - Added a read-only package-publication rehearsal, deterministic multi-crate publish order, and an
   evidence-based maintainer runbook for registry bootstrap and later OIDC trusted publishing.
+- Added operator-held authenticated audit anchors (`veyra journal anchor export` /
+  `veyra journal anchor check`, plus `Journal::export_audit_anchor` /
+  `Journal::verify_audit_anchor`). Export writes a `veyra.audit-anchor/v1` JSON artifact pinning
+  the audit `event_count` and `head_hash`, HMAC-SHA-256 authenticated with the journal's
+  `receipt.key`, so it can be kept outside the data directory. `check` verifies the artifact
+  schema, signer, and tag and requires the chain to still contain the pinned head, failing
+  closed on forged, foreign-key, malformed, or mis-pinned anchors — including a whole-database
+  rewrite the local count/head anchor cannot see. Later legitimate appends stay valid; the
+  residual narrows to protecting the exported anchor copies. See
+  `docs/architecture/adr/0005-external-audit-anchor-checkpoints.md`.
 
 ### Fixed
 

@@ -25,8 +25,10 @@ use veyra_protocol::{
     canonical_digest, canonical_json,
 };
 
+mod anchor;
 mod migration;
 
+pub use anchor::{AUDIT_ANCHOR_SCHEMA_VERSION, AnchorVerification, AuditAnchor};
 pub use migration::{
     AppliedMigrationStep, CURRENT_SCHEMA_VERSION, MINIMUM_SUPPORTED_SCHEMA_VERSION, MigrationReport,
 };

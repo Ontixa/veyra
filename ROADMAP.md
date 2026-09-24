@@ -38,7 +38,13 @@ execution boundary take priority over adapter count.
   after the live-authority recheck and before any staging or authority consumption, exact
   declared-path containment, fail-closed unknown kinds, journaled `effect.preconditions_evaluated`
   evidence, and the terminal `precondition_failed` outcome
-- An authenticated audit anchor outside SQLite or optional remote transparency sink
+- ~~An authenticated audit anchor outside SQLite~~ — delivered as the operator-held
+  `veyra.audit-anchor/v1` checkpoint (`veyra journal anchor export`/`check`,
+  `Journal::export_audit_anchor`/`verify_audit_anchor`): an HMAC-SHA-256 authenticated
+  count/head pin kept outside the data directory that detects a whole-database rewrite the
+  local anchor cannot see (see
+  `docs/architecture/adr/0005-external-audit-anchor-checkpoints.md`). An optional remote
+  transparency sink remains open for third-party verifiability
 - ~~First-class MCP interception example and A2A receipt exchange example~~ — delivered as runnable
   SDK examples (`packages/sdk-typescript/examples/`): a minimal MCP-shaped stdio tool surface gated
   by Veyra capability/approval policy, and an A2A-shaped task result whose receipt claim is
