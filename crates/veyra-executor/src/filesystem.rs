@@ -1352,6 +1352,43 @@ fn create_unique_stage_directory(directory: &Dir, path: &Path) -> Result<(), Ada
         .map_err(|error| fs_error("create unique stage", path, error))
 }
 
+/// Fail closed when `name` resolves inside `parent` under an alias rather than
+/// an entry's recorded name.
+///
+/// Windows name lookup is case-insensitive and honors 8.3 short-name aliases,
+/// so a component such as `NOTES` or `VEYRA~1` can open `notes` or `.veyra`
+/// without ever appearing in the directory's enumeration. Admitting such
+/// aliases would bypass the reserved-directory guard and record audit paths
+/// that match no on-disk entry. Components that resolve are therefore required
+/// to appear verbatim in the parent enumeration; a name that resolves but is
+/// never recorded is an alias and fails closed. Absent names are allowed so
+/// that create destinations and already-moved sources keep working.
+fn require_canonical_component(
+    parent: &Dir,
+    name: &std::ffi::OsStr,
+    context: &Path,
+) -> Result<(), AdapterError> {
+    match parent.symlink_metadata(name) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(fs_error("inspect path component", context, error)),
+    }
+    for result in parent
+        .entries()
+        .map_err(|error| fs_error("enumerate path component parent", context, error))?
+    {
+        let entry =
+            result.map_err(|error| fs_error("enumerate path component parent", context, error))?;
+        if entry.file_name().as_os_str() == name {
+            return Ok(());
+        }
+    }
+    Err(AdapterError::Containment(format!(
+        "filesystem alias component `{}` is not accepted",
+        display_relative(context)
+    )))
+}
+
 fn open_parent_nofollow<'a>(
     directory: &Dir,
     path: &'a Path,
@@ -1360,7 +1397,9 @@ fn open_parent_nofollow<'a>(
     let name = path
         .file_name()
         .ok_or_else(|| AdapterError::Containment("path has no final component".into()))?;
-    Ok((open_directory_nofollow(directory, parent)?, name))
+    let parent = open_directory_nofollow(directory, parent)?;
+    require_canonical_component(&parent, name, path)?;
+    Ok((parent, name))
 }
 
 fn open_directory_nofollow(directory: &Dir, path: &Path) -> Result<Dir, AdapterError> {
@@ -1375,6 +1414,7 @@ fn open_directory_nofollow(directory: &Dir, path: &Path) -> Result<Dir, AdapterE
             ));
         };
         traversed.push(name);
+        require_canonical_component(&opened, name, &traversed)?;
         opened = opened.open_dir_nofollow(name).map_err(|error| {
             if opened
                 .symlink_metadata(name)
@@ -1404,6 +1444,7 @@ fn open_or_create_directory_nofollow(directory: &Dir, path: &Path) -> Result<Dir
             ));
         };
         traversed.push(name);
+        require_canonical_component(&opened, name, &traversed)?;
         match opened.open_dir_nofollow(name) {
             Ok(next) => opened = next,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1972,8 +2013,45 @@ mod tests {
             "notes/file.txt:stream",
             "notes/NUL.txt",
             "notes/trailing.",
+            // Alternate data streams and NTFS stream/type syntax.
+            "notes/file.txt:$DATA",
+            "notes/file.txt::$DATA",
+            "notes/:stream",
+            // Drive-relative and UNC/extended-length prefixes in either slash
+            // direction are absolute authority, never relative components.
+            "C:/notes/file.txt",
+            "C:notes/file.txt",
+            "\\\\server\\share\\file.txt",
+            "//server/share/file.txt",
+            "\\\\?\\C:\\notes\\file.txt",
+            "//?/C:/notes/file.txt",
+            "\\\\.\\NUL",
+            "//./notes/file.txt",
+            // Reserved DOS device names in every casing and with extensions.
+            "notes/CON",
+            "notes/con",
+            "notes/con.txt",
+            "notes/PRN",
+            "notes/AUX",
+            "notes/COM1",
+            "notes/com5",
+            "notes/LPT9",
+            "notes/CONIN$",
+            "notes/CONOUT$",
+            "notes/CLOCK$",
+            "notes/COM¹",
+            "notes/LPT³",
+            // Trailing dots/spaces are stripped by Win32 name parsing and must
+            // never resolve to a different on-disk entry.
+            "notes/trailing ",
+            "notes/trailing .",
+            "notes/. ",
+            " ",
         ] {
-            assert!(adapter.paths(&effect("read", &[path], None)).is_err());
+            assert!(
+                adapter.paths(&effect("read", &[path], None)).is_err(),
+                "path `{path}` must be rejected"
+            );
         }
     }
 
@@ -2366,6 +2444,574 @@ mod tests {
                 .anomalies
                 .iter()
                 .any(|anomaly| anomaly.kind == StagingAnomalyKind::UnexpectedKind)
+        );
+    }
+
+    // ----- Windows reparse-point and name-resolution adversarial coverage -----
+    //
+    // These tests pin the containment contract on a filesystem where ordinary
+    // name lookup follows junctions and symlinks, resolves 8.3 short-name
+    // aliases, and folds case. Every link or alias must fail closed — never be
+    // silently followed — and the refusal must be identical across preflight,
+    // staging, execution, verification, and rollback.
+
+    /// Create a directory junction with `mklink /J`.
+    ///
+    /// Junctions need no special privilege on Windows, so creation failures
+    /// are asserted rather than skipped. Forward slashes are normalized away:
+    /// `cmd` treats `/` inside an argument as switch syntax.
+    #[cfg(windows)]
+    fn create_junction(link: &Path, target: &Path) {
+        let link = link.to_string_lossy().replace('/', "\\");
+        let target = target.to_string_lossy().replace('/', "\\");
+        let output = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J", &link, &target])
+            .output()
+            .expect("cmd.exe is required to create junctions");
+        assert!(
+            output.status.success(),
+            "mklink /J {link} {target} failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Try to create a directory symlink; returns `false` with a visible skip
+    /// reason when the host lacks `SeCreateSymbolicLinkPrivilege` (Developer
+    /// Mode or an elevated token).
+    #[cfg(windows)]
+    fn create_dir_symlink(link: &Path, target: &Path) -> bool {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "skipping directory-symlink case on {}: {error} \
+                     (symlink creation requires Developer Mode or privilege)",
+                    link.display()
+                );
+                false
+            }
+        }
+    }
+
+    /// Try to create a file symlink; same skip contract as
+    /// [`create_dir_symlink`].
+    #[cfg(windows)]
+    fn create_file_symlink(link: &Path, target: &Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!(
+                    "skipping file-symlink case on {}: {error} \
+                     (symlink creation requires Developer Mode or privilege)",
+                    link.display()
+                );
+                false
+            }
+        }
+    }
+
+    /// Return the recorded 8.3 short name of `path`'s final component when the
+    /// volume assigns one, or `None` where short-name generation is disabled.
+    ///
+    /// NTFS generates `BASE~N.EXT` aliases — uppercase, leading dots stripped,
+    /// six base characters plus `~N`, extension truncated to three — so the
+    /// candidates are enumerable. A candidate only counts when `canonicalize`
+    /// proves it names the same entry, which also filters hash-form aliases and
+    /// coincidental real files.
+    #[cfg(windows)]
+    fn short_name_alias(path: &Path) -> Option<String> {
+        let canonical = std::fs::canonicalize(path).ok()?;
+        let parent = path.parent()?;
+        let name = path.file_name()?.to_str()?;
+        let (stem, extension) = match name.rfind('.') {
+            Some(dot) if dot > 0 => (&name[..dot], Some(&name[dot + 1..])),
+            _ => (name, None),
+        };
+        let base: String = stem
+            .trim_start_matches('.')
+            .chars()
+            .filter(|c| *c != ' ' && *c != '.')
+            .take(6)
+            .collect::<String>()
+            .to_ascii_uppercase();
+        let extension = extension.map(|ext| {
+            ext.chars()
+                .filter(|c| *c != ' ' && *c != '.')
+                .take(3)
+                .collect::<String>()
+                .to_ascii_uppercase()
+        });
+        for n in 1..=9u8 {
+            let candidate = match &extension {
+                Some(ext) if !ext.is_empty() => format!("{base}~{n}.{ext}"),
+                _ => format!("{base}~{n}"),
+            };
+            if candidate == name {
+                continue;
+            }
+            let candidate_path = parent.join(&candidate);
+            if candidate_path.symlink_metadata().is_ok()
+                && std::fs::canonicalize(&candidate_path).ok() == Some(canonical.clone())
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Build a workspace on a volume that assigns 8.3 short names, returning
+    /// the adapter and the recorded alias of its reserved `.veyra` directory.
+    /// Temp locations are tried in order; when none generates short names the
+    /// host cannot express the case and the caller skips with a printed reason.
+    #[cfg(windows)]
+    fn eight3_alias_workspace() -> Option<(TempDir, FilesystemAdapter, String)> {
+        let mut bases = vec![std::env::temp_dir()];
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            let candidate = PathBuf::from(local).join("Temp");
+            if !bases.contains(&candidate) {
+                bases.push(candidate);
+            }
+        }
+        for base in bases {
+            let Ok(temp) = TempDir::new_in(&base) else {
+                continue;
+            };
+            let Ok(adapter) = FilesystemAdapter::new(FilesystemConfig {
+                workspace_name: "demo".into(),
+                root: temp.path().to_path_buf(),
+                maximum_file_bytes: 1024 * 1024,
+                maximum_diff_bytes: 64 * 1024,
+            }) else {
+                continue;
+            };
+            if let Some(alias) = short_name_alias(&temp.path().join(INTERNAL_DIRECTORY)) {
+                return Some((temp, adapter, alias));
+            }
+        }
+        eprintln!(
+            "skipping 8.3 alias case: no writable temp volume generates short names \
+             (8dot3name generation is commonly disabled outside the system volume)"
+        );
+        None
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn junction_components_never_escape_the_workspace() {
+        let (temp, adapter) = adapter();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "do not read").unwrap();
+        std::fs::write(temp.path().join("notes/movesrc.txt"), "move me").unwrap();
+        create_junction(&temp.path().join("link"), outside.path());
+        let context = context();
+
+        for effect in [
+            effect("read", &["link/secret.txt"], None),
+            effect("delete", &["link/secret.txt"], None),
+            effect("patch", &["link/secret.txt"], Some("tamper")),
+            effect("create", &["link/dropped.txt"], Some("drop")),
+            effect("move", &["notes/movesrc.txt", "link/moved.txt"], None),
+        ] {
+            assert!(
+                matches!(
+                    adapter.preflight(&effect, &context).await,
+                    Err(AdapterError::Containment(_))
+                ),
+                "{} on {:?} was not refused as a containment violation",
+                effect.operation,
+                effect.resource
+            );
+        }
+        // A junction named as the leaf of an operation is likewise refused.
+        assert!(
+            adapter
+                .preflight(&effect("read", &["link"], None), &context)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+            "do not read"
+        );
+        assert!(!outside.path().join("dropped.txt").exists());
+        assert!(!outside.path().join("moved.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn junction_to_inside_target_is_still_refused() {
+        // The no-link contract is uniform: a junction whose target stays inside
+        // the workspace is still a reparse point and must fail closed.
+        let (temp, adapter) = adapter();
+        std::fs::write(temp.path().join("notes/real.txt"), "inside").unwrap();
+        create_junction(&temp.path().join("alias"), &temp.path().join("notes"));
+
+        assert!(matches!(
+            adapter
+                .preflight(&effect("read", &["alias/real.txt"], None), &context())
+                .await,
+            Err(AdapterError::Containment(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn junction_swapped_in_after_staging_fails_every_later_phase() {
+        let (temp, adapter) = adapter();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("notes/file.txt"), "before").unwrap();
+        let context = context();
+        let (patch, staged) = preflight_and_stage(
+            &adapter,
+            effect("patch", &["notes/file.txt"], Some("after")),
+            &context,
+        )
+        .await;
+
+        // Replace the parent directory with a junction pointing outside the
+        // root between staging and execution. Every phase re-traverses the
+        // path through no-follow handles, so the swap must fail closed and the
+        // staged copies stay in `.veyra` as manual-recovery evidence.
+        std::fs::remove_file(temp.path().join("notes/file.txt")).unwrap();
+        std::fs::remove_dir(temp.path().join("notes")).unwrap();
+        create_junction(&temp.path().join("notes"), outside.path());
+
+        assert!(matches!(
+            adapter.execute(&patch, &staged, &context).await,
+            Err(AdapterError::Containment(_))
+        ));
+        assert!(adapter.rollback(&patch, &staged, &context).await.is_err());
+        assert!(matches!(
+            adapter
+                .preflight(&effect("read", &["notes/file.txt"], None), &context)
+                .await,
+            Err(AdapterError::Containment(_))
+        ));
+        assert_eq!(
+            std::fs::read_dir(outside.path()).unwrap().count(),
+            0,
+            "nothing may be created or modified outside the workspace"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn workspace_root_reached_through_junction_stays_confined() {
+        // The configured root is trusted ambient configuration; resolving a
+        // junction there pins the capability handle to the real directory. The
+        // property under test is that everything below stays confined.
+        let real = TempDir::new().unwrap();
+        std::fs::create_dir(real.path().join("notes")).unwrap();
+        std::fs::write(real.path().join("notes/file.txt"), "kept").unwrap();
+        let linkdir = TempDir::new().unwrap();
+        let junction = linkdir.path().join("root");
+        create_junction(&junction, real.path());
+
+        let adapter = FilesystemAdapter::new(FilesystemConfig {
+            workspace_name: "demo".into(),
+            root: junction.clone(),
+            maximum_file_bytes: 1024 * 1024,
+            maximum_diff_bytes: 64 * 1024,
+        })
+        .unwrap();
+        let context = context();
+        assert!(
+            adapter
+                .preflight(&effect("read", &["notes/file.txt"], None), &context)
+                .await
+                .is_ok()
+        );
+        assert!(
+            adapter
+                .preflight(&effect("read", &["../outside"], None), &context)
+                .await
+                .is_err()
+        );
+
+        // A junction planted inside that workspace still fails closed.
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+        create_junction(&real.path().join("escape"), outside.path());
+        assert!(matches!(
+            adapter
+                .preflight(&effect("read", &["escape/secret.txt"], None), &context)
+                .await,
+            Err(AdapterError::Containment(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn internal_directory_as_junction_fails_adapter_construction() {
+        // A workspace handed to Veyra may already contain a hostile `.veyra`
+        // reparse point; adapter construction must refuse it rather than create
+        // staging artifacts through the link.
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        create_junction(&temp.path().join(INTERNAL_DIRECTORY), outside.path());
+        assert!(matches!(
+            FilesystemAdapter::new(FilesystemConfig {
+                workspace_name: "demo".into(),
+                root: temp.path().to_path_buf(),
+                maximum_file_bytes: 1024,
+                maximum_diff_bytes: 1024,
+            }),
+            Err(AdapterError::Containment(_))
+        ));
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn symlink_components_fail_closed_when_creatable() {
+        let (temp, adapter) = adapter();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "do not read").unwrap();
+        let link = temp.path().join("link");
+        if !create_dir_symlink(&link, outside.path()) {
+            return;
+        }
+        let context = context();
+        for effect in [
+            effect("read", &["link/secret.txt"], None),
+            effect("delete", &["link/secret.txt"], None),
+            effect("create", &["link/dropped.txt"], Some("drop")),
+        ] {
+            assert!(
+                matches!(
+                    adapter.preflight(&effect, &context).await,
+                    Err(AdapterError::Containment(_))
+                ),
+                "{} on {:?} was not refused as a containment violation",
+                effect.operation,
+                effect.resource
+            );
+        }
+        // A file symlink as the leaf of a read is never opened either.
+        let leaf_link = temp.path().join("leaf.txt");
+        if create_file_symlink(&leaf_link, &outside.path().join("secret.txt")) {
+            assert!(
+                adapter
+                    .preflight(&effect("read", &["leaf.txt"], None), &context)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("secret.txt")).unwrap(),
+            "do not read"
+        );
+        assert!(!outside.path().join("dropped.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn case_alias_components_fail_closed() {
+        // Windows name resolution is case-insensitive, but effect paths are
+        // audit evidence: a component that resolves only through case folding
+        // is refused so the recorded name is the name on disk.
+        let (temp, adapter) = adapter();
+        std::fs::write(temp.path().join("notes/file.txt"), "kept").unwrap();
+        let context = context();
+        for path in ["NOTES/file.txt", "notes/FILE.TXT", "Notes/File.Txt"] {
+            assert!(
+                matches!(
+                    adapter
+                        .preflight(&effect("read", &[path], None), &context)
+                        .await,
+                    Err(AdapterError::Containment(_))
+                ),
+                "`{path}` resolved through a case alias"
+            );
+        }
+        assert!(
+            adapter
+                .preflight(&effect("read", &["notes/file.txt"], None), &context)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn internal_directory_8_3_alias_fails_closed() {
+        let Some((temp, adapter, alias)) = eight3_alias_workspace() else {
+            return;
+        };
+        let context = context();
+        // `VEYRA~1`-style aliases reach the reserved `.veyra` tree on volumes
+        // that generate short names; every phase must refuse them exactly like
+        // the canonical spelling.
+        for path in [
+            alias.clone(),
+            format!("{alias}/staging"),
+            format!("{alias}/journal.db"),
+        ] {
+            assert!(
+                matches!(
+                    adapter
+                        .preflight(&effect("read", &[path.as_str()], None), &context)
+                        .await,
+                    Err(AdapterError::Containment(_))
+                ),
+                "`{path}` reached the reserved directory through an 8.3 alias"
+            );
+        }
+        assert!(matches!(
+            adapter
+                .preflight(
+                    &effect(
+                        "create",
+                        &[format!("{alias}/dropped.txt").as_str()],
+                        Some("x")
+                    ),
+                    &context
+                )
+                .await,
+            Err(AdapterError::Containment(_))
+        ));
+        drop(temp);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn leaf_8_3_alias_fails_closed() {
+        let Some((temp, adapter, _)) = eight3_alias_workspace() else {
+            return;
+        };
+        std::fs::create_dir(temp.path().join("notes")).unwrap();
+        let file = temp.path().join("notes/a-very-long-file-name.txt");
+        std::fs::write(&file, "kept").unwrap();
+        let Some(alias) = short_name_alias(&file) else {
+            eprintln!("skipping leaf 8.3 case: file received no short name");
+            return;
+        };
+        let context = context();
+        assert!(
+            adapter
+                .preflight(
+                    &effect("read", &["notes/a-very-long-file-name.txt"], None),
+                    &context
+                )
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            adapter
+                .preflight(
+                    &effect("read", &[format!("notes/{alias}").as_str()], None),
+                    &context
+                )
+                .await,
+            Err(AdapterError::Containment(_))
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staging_sweep_never_descends_into_junctions() {
+        let (temp, adapter) = adapter();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("keep"), b"outside").unwrap();
+        let linked_tree = TransactionId::new();
+        let embedded_link = TransactionId::new();
+        // A staging-root entry that is itself a junction is anomalous and
+        // retained; one inside a collectible tree is unlinked in place.
+        create_junction(
+            &temp
+                .path()
+                .join(".veyra")
+                .join("staging")
+                .join(linked_tree.to_string()),
+            outside.path(),
+        );
+        let artifact = stage_artifact(&temp, embedded_link);
+        create_junction(&artifact.parent().unwrap().join("escape"), outside.path());
+        let mut eligible = StagingEligibilityMap::new();
+        eligible.insert(linked_tree, eligibility(30));
+        eligible.insert(embedded_link, eligibility(30));
+
+        let report = adapter
+            .collect_staging(&eligible, &sweep_policy(), Utc::now())
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(outside.path().join("keep")).unwrap(),
+            b"outside"
+        );
+        assert_eq!(report.collections.len(), 1);
+        assert_eq!(report.collections[0].transaction_id, embedded_link);
+        assert!(
+            temp.path()
+                .join(".veyra/staging")
+                .join(linked_tree.to_string())
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            report
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.kind == StagingAnomalyKind::UnexpectedKind)
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn network_share_workspace_stays_confined_when_reachable() {
+        // There is no unprivileged way to stand up an SMB share in a unit
+        // test; probe loopback targets and skip when the host offers none.
+        let mut unc_temp = None;
+        for share in [
+            r"\\localhost\C$\Windows\Temp",
+            r"\\localhost\D$\ytb_tool_temp",
+        ] {
+            if Path::new(share).is_dir()
+                && let Ok(temp) = TempDir::new_in(share)
+            {
+                unc_temp = Some(temp);
+                break;
+            }
+        }
+        let Some(unc_temp) = unc_temp else {
+            eprintln!(
+                "skipping network-filesystem case: no writable loopback UNC share \
+                 (\\\\localhost\\C$ requires elevation on this host)"
+            );
+            return;
+        };
+        // cap-std relative opens do not cover every UNC backend; a refusal at
+        // construction is itself the fail-closed outcome, so it is reported and
+        // skipped rather than asserted away.
+        let Ok(adapter) = FilesystemAdapter::new(FilesystemConfig {
+            workspace_name: "demo".into(),
+            root: unc_temp.path().to_path_buf(),
+            maximum_file_bytes: 1024 * 1024,
+            maximum_diff_bytes: 64 * 1024,
+        }) else {
+            eprintln!(
+                "skipping network-filesystem case: adapter construction on a UNC \
+                 root fails closed on this host"
+            );
+            return;
+        };
+        let context = context();
+        std::fs::create_dir(unc_temp.path().join("notes")).unwrap();
+        std::fs::write(unc_temp.path().join("notes/file.txt"), "over smb").unwrap();
+        assert!(
+            adapter
+                .preflight(&effect("read", &["notes/file.txt"], None), &context)
+                .await
+                .is_ok()
+        );
+        assert!(
+            adapter
+                .preflight(&effect("read", &["../outside"], None), &context)
+                .await
+                .is_err()
         );
     }
 }

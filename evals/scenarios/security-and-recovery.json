@@ -551,5 +551,65 @@
     "expected": "link_targets_untouched",
     "unsupported_platforms": ["win32"],
     "environment_limitation": "The adversarial symlink fixture is Unix-only because unprivileged Windows symlink creation requires Developer Mode or elevation; lexical and canonical-name fail-closed tests still run on Windows."
+  },
+  {
+    "id": "EV-070",
+    "category": "symlink_escape",
+    "title": "Junction components never escape the workspace",
+    "gate": "rust",
+    "probe": "junction_components_never_escape_the_workspace",
+    "expected": "containment_error",
+    "unsupported_platforms": ["linux", "darwin"],
+    "environment_limitation": "Junctions need no privilege on Windows, so the fixture always runs there; other platforms cover the same contract through the Unix symlink tests."
+  },
+  {
+    "id": "EV-071",
+    "category": "toctou",
+    "title": "A junction swapped in after staging fails execution and rollback",
+    "gate": "rust",
+    "probe": "junction_swapped_in_after_staging_fails_every_later_phase",
+    "expected": "containment_error",
+    "unsupported_platforms": ["linux", "darwin"],
+    "environment_limitation": "Windows-only reparse-point fixture; junction creation is unprivileged."
+  },
+  {
+    "id": "EV-072",
+    "category": "symlink_escape",
+    "title": "Staging sweep unlinks but never descends into junctions",
+    "gate": "rust",
+    "probe": "staging_sweep_never_descends_into_junctions",
+    "expected": "link_targets_untouched",
+    "unsupported_platforms": ["linux", "darwin"],
+    "environment_limitation": "Windows junction fixture; the Unix counterpart EV-069 covers symlinks."
+  },
+  {
+    "id": "EV-073",
+    "category": "canonical_input",
+    "title": "Case-folded path components fail closed instead of resolving",
+    "gate": "rust",
+    "probe": "case_alias_components_fail_closed",
+    "expected": "containment_error",
+    "unsupported_platforms": ["linux", "darwin"],
+    "environment_limitation": "Case-insensitive name resolution is a Windows filesystem behavior; case-sensitive filesystems reject the same inputs as not-found."
+  },
+  {
+    "id": "EV-074",
+    "category": "canonical_input",
+    "title": "8.3 aliases of the reserved .veyra directory fail closed",
+    "gate": "rust",
+    "probe": "internal_directory_8_3_alias_fails_closed",
+    "expected": "containment_error",
+    "unsupported_platforms": ["linux", "darwin"],
+    "environment_limitation": "Requires a volume with 8.3 short-name generation enabled (typical on the Windows system volume, often disabled elsewhere); the probe skips with a printed reason when no candidate temp location assigns short names."
+  },
+  {
+    "id": "EV-075",
+    "category": "symlink_escape",
+    "title": "Windows symlink components fail closed when creatable",
+    "gate": "rust",
+    "probe": "symlink_components_fail_closed_when_creatable",
+    "expected": "containment_error",
+    "unsupported_platforms": ["linux", "darwin"],
+    "environment_limitation": "Unprivileged Windows symlink creation requires Developer Mode or elevation; the test skips with a printed reason when the host lacks it."
   }
 ]
