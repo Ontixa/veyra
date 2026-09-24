@@ -79,7 +79,10 @@ boundary is justified, record it in an ADR.
 - Raw secrets use references, resolve only at the adapter boundary, and never serialize into normal
   plans, receipts, logs, client errors, or audit exports.
 - Unsupported inputs, conditions, capability caveats, retry semantics, and protocol preconditions
-  fail closed. V0.1 rejects non-empty preconditions rather than pretending to evaluate them.
+  fail closed. Declared preconditions evaluate under the bounded VEP-0002 `veyra.preconditions/v1`
+  contract (`file_exists`/`file_sha256` inside the declared resource, after the live-authority
+  recheck, before any staging or authority consumption); every other kind and any unevaluable or
+  out-of-scope condition ends the transaction in terminal `precondition_failed`.
 - Shell interpolation is never implicit. Process execution is disabled unless exactly configured,
   high risk, byte/time bounded, and honestly irreversible.
 - “Reversible” is reserved for verified restoration under documented preconditions. Compensation,

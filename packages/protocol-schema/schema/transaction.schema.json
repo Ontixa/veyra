@@ -156,6 +156,11 @@
           "const": "denied"
         },
         {
+          "description": "A declared precondition was false or unevaluable before any side effect was attempted.",
+          "type": "string",
+          "const": "precondition_failed"
+        },
+        {
           "description": "Execution or verification failed.",
           "type": "string",
           "const": "failed"

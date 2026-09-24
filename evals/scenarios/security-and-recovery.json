@@ -409,7 +409,7 @@
   {
     "id": "EV-052",
     "category": "model_output",
-    "title": "Raw credential-shaped inputs and unevaluated conditions fail closed",
+    "title": "Raw credential-shaped inputs and unsupported precondition kinds fail closed",
     "gate": "rust",
     "probe": "planner_inputs_and_conditions_fail_closed_before_adapter_access",
     "expected": "plan_rejected"
@@ -417,7 +417,7 @@
   {
     "id": "EV-053",
     "category": "capability_escalation",
-    "title": "Filesystem postconditions cannot observe paths outside effect scope",
+    "title": "Filesystem conditions cannot observe paths outside the declared effect scope",
     "gate": "rust",
     "probe": "filesystem_conditions_cannot_read_outside_the_effect_scope",
     "expected": "containment_error"
@@ -611,5 +611,61 @@
     "expected": "containment_error",
     "unsupported_platforms": ["linux", "darwin"],
     "environment_limitation": "Unprivileged Windows symlink creation requires Developer Mode or elevation; the test skips with a printed reason when the host lacks it."
+  },
+  {
+    "id": "EV-076",
+    "category": "precondition_contract",
+    "title": "A satisfied declared precondition gates then commits with journaled evidence",
+    "gate": "rust",
+    "probe": "satisfied_precondition_commits_with_journaled_evaluation",
+    "expected": "committed_with_journaled_evaluation"
+  },
+  {
+    "id": "EV-077",
+    "category": "precondition_contract",
+    "title": "A false precondition ends the transaction before any side effect",
+    "gate": "rust",
+    "probe": "false_precondition_fails_closed_before_any_side_effect",
+    "expected": "precondition_failed_no_side_effects"
+  },
+  {
+    "id": "EV-078",
+    "category": "precondition_contract",
+    "title": "Capability revoked after approval fails closed before precondition evaluation",
+    "gate": "rust",
+    "probe": "precondition_evaluation_never_runs_after_capability_revocation",
+    "expected": "authority_rechecked_before_evaluation"
+  },
+  {
+    "id": "EV-079",
+    "category": "precondition_contract",
+    "title": "Adapter precondition errors and malformed evidence fail closed",
+    "gate": "rust",
+    "probe": "adapter_precondition_errors_and_bad_evidence_fail_closed",
+    "expected": "precondition_failed"
+  },
+  {
+    "id": "EV-080",
+    "category": "precondition_contract",
+    "title": "Missing, mismatched, or oversized adapter precondition evidence is rejected",
+    "gate": "rust",
+    "probe": "malformed_adapter_precondition_evidence_is_rejected",
+    "expected": "invariant_rejected"
+  },
+  {
+    "id": "EV-081",
+    "category": "precondition_contract",
+    "title": "Precondition evaluation observes only the declared resource paths",
+    "gate": "rust",
+    "probe": "precondition_evaluation_observes_only_the_declared_resource",
+    "expected": "containment_denied"
+  },
+  {
+    "id": "EV-082",
+    "category": "precondition_contract",
+    "title": "precondition_failed is a stable serialized terminal state",
+    "gate": "rust",
+    "probe": "precondition_failed_state_has_a_stable_wire_name",
+    "expected": "stable_wire_value"
   }
 ]

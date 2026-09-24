@@ -37,3 +37,25 @@ test("committed compatibility fixtures retain their cross-record bindings", asyn
   ]);
   assert.equal(intent.context.path, "demo/hello.txt");
 });
+
+test("the VEP-0002 precondition_failed state is a stable serialized value", async () => {
+  const transaction = JSON.parse(
+    await readFile(
+      resolve(fixtureDirectory, "precondition-failed.transaction.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(transaction.schema_version, "veyra.protocol/v1");
+  assert.equal(transaction.state, "precondition_failed");
+  const schema = JSON.parse(
+    await readFile(resolve(directory, "transaction.schema.json"), "utf8"),
+  );
+  const states = schema.$defs.TransactionState.oneOf.map(
+    (variant) => variant.const,
+  );
+  assert.ok(
+    states.includes("precondition_failed"),
+    "generated TransactionState schema must include the VEP-0002 state",
+  );
+  assert.equal(states.length, 17);
+});

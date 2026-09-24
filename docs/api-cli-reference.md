@@ -57,6 +57,12 @@ The bundle contains transaction, intent, plan, policy decisions, requests, grant
 receipts, verifications, compensations, and events from one consistent database read path. Serialized
 record shapes live in the generated JSON Schemas.
 
+A `transactions/{id}/run` call can end in the terminal `precondition_failed` state: declared
+`veyra.preconditions/v1` conditions are evaluated after the live-authority recheck and before any
+staging or authority consumption, and a false or unevaluable condition leaves the transaction in
+`precondition_failed` with no receipts. The `effect.preconditions_evaluated` and
+`transaction.precondition_failed` audit events carry the bounded evidence (VEP-0002).
+
 List endpoints are hard-bounded. Transactions default to 100 and allow at most 500; recent audit
 events default to 200 and allow at most 1,000; recovery defaults to 200 and allows at most 500;
 ascending text export defaults to 1,000 and allows at most 5,000. The bundle's ascending `events`
@@ -97,7 +103,8 @@ At startup — after restart recovery and before serving — the daemon runs one
 retention sweep over each workspace's `.veyra/staging` tree. Only transactions in final states
 (`denied`, `rolled_back`, `cancelled`) that have held that state for at least
 `--staging-retention-days` are collected; artifacts for pending, in-flight, recoverable, and
-committed transactions are never deleted. Every sweep and per-transaction collection is
+committed transactions are never deleted. (`precondition_failed` is also a true sink, but such
+transactions never produce staging artifacts.) Every sweep and per-transaction collection is
 journaled (`staging.sweep_started`, `staging.collected`, `staging.sweep_completed`) so decisions
 are auditable. `--disable-staging-retention` preserves every staging artifact forever, and
 embedded daemons control the policy — including opting `partially_compensated` into collection

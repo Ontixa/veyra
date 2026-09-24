@@ -344,40 +344,8 @@ impl EffectAdapter for FilesystemAdapter {
                 "filesystem effect contains missing or unsupported inputs".into(),
             ));
         }
-        if !effect.preconditions.is_empty() {
-            return Err(AdapterError::InvalidEffect(
-                "filesystem preconditions are not implemented and cannot be declared".into(),
-            ));
-        }
-        for condition in &effect.expected_postconditions {
-            match condition {
-                Condition::FileExists { path, .. } => {
-                    let path = normalized_relative_path(path)?;
-                    if !paths.contains(&path) {
-                        return Err(AdapterError::Containment(
-                            "filesystem postcondition expands beyond the effect resource".into(),
-                        ));
-                    }
-                }
-                Condition::FileSha256 { path, digest } => {
-                    let path = normalized_relative_path(path)?;
-                    if !paths.contains(&path) {
-                        return Err(AdapterError::Containment(
-                            "filesystem postcondition expands beyond the effect resource".into(),
-                        ));
-                    }
-                    validate_sha256(digest, "filesystem postcondition")?;
-                }
-                Condition::OutputSha256 { digest } => {
-                    validate_sha256(digest, "filesystem output postcondition")?;
-                }
-                Condition::HttpStatus { .. } | Condition::Custom { .. } => {
-                    return Err(AdapterError::InvalidEffect(
-                        "filesystem effect declares an unsupported postcondition".into(),
-                    ));
-                }
-            }
-        }
+        validate_conditions(&effect.preconditions, &paths, "precondition")?;
+        validate_conditions(&effect.expected_postconditions, &paths, "postcondition")?;
         if matches!(effect.operation.as_str(), "create" | "patch") {
             let _ = effect_content(effect, self.config.maximum_file_bytes)?;
         }
@@ -609,6 +577,20 @@ impl EffectAdapter for FilesystemAdapter {
                 })
             }
         }
+    }
+
+    async fn check_preconditions(
+        &self,
+        effect: &Effect,
+        _context: &AdapterContext,
+    ) -> Result<Vec<VerificationCheck>, AdapterError> {
+        self.validate(effect)?;
+        let paths = self.paths(effect)?;
+        let mut checks = Vec::with_capacity(effect.preconditions.len());
+        for condition in &effect.preconditions {
+            checks.push(self.check_precondition(condition, &paths)?);
+        }
+        Ok(checks)
     }
 
     async fn verify(
@@ -1025,6 +1007,60 @@ impl FilesystemAdapter {
                 "deleted path absence checked".into(),
             )),
         }
+    }
+
+    /// Evaluate one declared precondition inside the effect's declared resource paths.
+    ///
+    /// Evaluation re-checks containment at evaluation time so a condition can never observe
+    /// outside the authorized resource. A false condition is a passed check with
+    /// `passed: false`; only an unobservable state or an out-of-scope/unsupported condition
+    /// is an error, which the kernel records as an honest precondition failure.
+    fn check_precondition(
+        &self,
+        condition: &Condition,
+        paths: &[PathBuf],
+    ) -> Result<VerificationCheck, AdapterError> {
+        let (passed, message) = match condition {
+            Condition::FileExists { path, expected } => {
+                let path = normalized_relative_path(path)?;
+                if !paths.contains(&path) {
+                    return Err(AdapterError::Containment(
+                        "filesystem precondition expands beyond the effect resource".into(),
+                    ));
+                }
+                let actual = path_exists_nofollow(&self.directory, &path)?;
+                (actual == *expected, format!("existence was {actual}"))
+            }
+            Condition::FileSha256 { path, digest } => {
+                let path = normalized_relative_path(path)?;
+                if !paths.contains(&path) {
+                    return Err(AdapterError::Containment(
+                        "filesystem precondition expands beyond the effect resource".into(),
+                    ));
+                }
+                validate_sha256(digest, "filesystem precondition")?;
+                if path_exists_nofollow(&self.directory, &path)? {
+                    let content =
+                        read_regular_file(&self.directory, &path, self.config.maximum_file_bytes)?;
+                    let actual = sha256(&content);
+                    (actual == *digest, format!("observed sha256 {actual}"))
+                } else {
+                    (false, "path is absent".into())
+                }
+            }
+            Condition::HttpStatus { .. }
+            | Condition::OutputSha256 { .. }
+            | Condition::Custom { .. } => {
+                return Err(AdapterError::InvalidEffect(
+                    "condition is not a supported filesystem precondition".into(),
+                ));
+            }
+        };
+        Ok(VerificationCheck {
+            condition: condition.clone(),
+            passed,
+            message,
+        })
     }
 
     fn check_condition(
@@ -1642,6 +1678,43 @@ fn validate_sha256(value: &str, subject: &str) -> Result<(), AdapterError> {
     }
 }
 
+/// Shape-check declared conditions against the effect's exact resource paths.
+///
+/// Preconditions accept only the VEP-0002 `veyra.preconditions/v1` deterministic kinds
+/// (`file_exists`, `file_sha256`); postconditions additionally allow `output_sha256`. Every
+/// path-bearing condition must name one of the effect's declared resource paths so a declared
+/// condition can never reach outside authorized scope.
+fn validate_conditions(
+    conditions: &[Condition],
+    paths: &[PathBuf],
+    role: &'static str,
+) -> Result<(), AdapterError> {
+    for condition in conditions {
+        match condition {
+            Condition::FileExists { path, .. } | Condition::FileSha256 { path, .. } => {
+                let path = normalized_relative_path(path)?;
+                if !paths.contains(&path) {
+                    return Err(AdapterError::Containment(format!(
+                        "filesystem {role} expands beyond the effect resource"
+                    )));
+                }
+                if let Condition::FileSha256 { digest, .. } = condition {
+                    validate_sha256(digest, &format!("filesystem {role}"))?;
+                }
+            }
+            Condition::OutputSha256 { digest } if role == "postcondition" => {
+                validate_sha256(digest, "filesystem output postcondition")?;
+            }
+            _ => {
+                return Err(AdapterError::InvalidEffect(format!(
+                    "filesystem effect declares an unsupported {role}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_captured_file(
     directory: &Dir,
     path: &Path,
@@ -2102,12 +2175,82 @@ mod tests {
         ));
 
         candidate.expected_postconditions.clear();
+        // VEP-0002 `veyra.preconditions/v1`: in-scope deterministic filesystem preconditions
+        // are valid; out-of-scope or non-evaluable kinds still fail closed.
         candidate.preconditions = vec![Condition::FileExists {
             path: "notes/allowed.txt".into(),
             expected: true,
         }];
+        adapter.validate(&candidate).unwrap();
+
+        candidate.preconditions = vec![Condition::FileExists {
+            path: "notes/private.txt".into(),
+            expected: true,
+        }];
         assert!(matches!(
             adapter.validate(&candidate),
+            Err(AdapterError::Containment(_))
+        ));
+
+        candidate.preconditions = vec![Condition::HttpStatus { status: 200 }];
+        assert!(matches!(
+            adapter.validate(&candidate),
+            Err(AdapterError::InvalidEffect(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn precondition_evaluation_observes_only_the_declared_resource() {
+        let (temp, adapter) = adapter();
+        let context = context();
+        std::fs::write(temp.path().join("notes/present.txt"), "hello\n").unwrap();
+
+        let mut candidate = effect("create", &["notes/present.txt"], Some("changed\n"));
+        candidate.preconditions = vec![
+            Condition::FileExists {
+                path: "notes/present.txt".into(),
+                expected: true,
+            },
+            Condition::FileSha256 {
+                path: "notes/present.txt".into(),
+                digest: sha256(b"hello\n"),
+            },
+        ];
+        let checks = adapter
+            .check_preconditions(&candidate, &context)
+            .await
+            .unwrap();
+        assert_eq!(checks.len(), 2);
+        assert!(checks.iter().all(|check| check.passed));
+
+        // A false precondition is evidence, not an error.
+        if let Condition::FileSha256 { digest, .. } = &mut candidate.preconditions[1] {
+            *digest = "00".repeat(32);
+        }
+        let checks = adapter
+            .check_preconditions(&candidate, &context)
+            .await
+            .unwrap();
+        assert!(checks[0].passed);
+        assert!(!checks[1].passed);
+
+        // Evaluation re-checks containment: a precondition outside the declared resource is an
+        // error the kernel turns into an honest failure, never an observation grant.
+        candidate.preconditions = vec![Condition::FileExists {
+            path: "notes/other.txt".into(),
+            expected: false,
+        }];
+        assert!(matches!(
+            adapter.check_preconditions(&candidate, &context).await,
+            Err(AdapterError::Containment(_))
+        ));
+
+        candidate.preconditions = vec![Condition::Custom {
+            name: "veyra.example.unverifiable/v1".into(),
+            parameters: json!({}),
+        }];
+        assert!(matches!(
+            adapter.check_preconditions(&candidate, &context).await,
             Err(AdapterError::InvalidEffect(_))
         ));
     }

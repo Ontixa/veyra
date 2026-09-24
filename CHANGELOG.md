@@ -7,6 +7,16 @@ Changelog conventions.
 
 ### Added
 
+- Added the versioned precondition-evaluation contract `veyra.preconditions/v1`
+  (`docs/protocol/VEP-0002.md`). Effects may now declare filesystem `file_exists` and
+  `file_sha256` preconditions, which the adapter evaluates read-only inside the exact declared
+  resource paths after the kernel rechecks live capability and approval authority and before
+  any capability use, staging, or side effect. Every other condition kind, unknown operators,
+  out-of-scope paths, adapter errors, and malformed evidence all fail closed: a journaled
+  `effect.preconditions_evaluated` event per effect and a terminal `precondition_failed`
+  transaction state instead of a crash or false success. Preconditions never widen authority
+  and a satisfied list only permits the normal pipeline to continue; HTTP, process, and custom
+  adapters keep rejecting declared preconditions.
 - Defined the v0.2 journal storage-migration contract: `metadata.schema_version` is the durable
   schema authority written atomically with first initialization, `Journal::open` refuses an older
   supported version without mutating it (`JournalError::MigrationRequired`), and missing,

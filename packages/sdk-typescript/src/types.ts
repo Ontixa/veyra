@@ -198,6 +198,7 @@ export type TransactionState =
   | "verifying"
   | "committed"
   | "denied"
+  | "precondition_failed"
   | "failed"
   | "compensating"
   | "rolled_back"

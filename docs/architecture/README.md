@@ -60,6 +60,7 @@ stateDiagram-v2
     Preflighted --> Denied
     AwaitingApproval --> Approved
     Approved --> Staged
+    Approved --> PreconditionFailed
     Staged --> Executing
     Executing --> Verifying
     Verifying --> Committed
@@ -87,9 +88,13 @@ recorded atomically with durable state mutation. Invalid or stale transitions re
 4. A human approval grant repeats the exact digest and single-use challenge nonce. The grant is
    durable, but the nonce is consumed only when execution begins.
 5. Immediately before staging, the kernel revalidates capability status, aggregate use budgets,
-   approval expiry, and effect digest. For each effect it atomically consumes capability uses and the
-   optional approval nonce with audit evidence, then stages durable restoration data. Before crossing
-   the external side-effect boundary it also reserves the idempotency key.
+   approval expiry, and effect digest. It then evaluates every declared `veyra.preconditions/v1`
+   precondition read-only inside the effect's declared resource (VEP-0002); a false or unevaluable
+   condition is journaled as `effect.preconditions_evaluated` and the transaction ends in the
+   terminal `precondition_failed` state without consuming authority. Only when every precondition
+   passes does the kernel, for each effect, atomically consume capability uses and the optional
+   approval nonce with audit evidence, then stage durable restoration data. Before crossing the
+   external side-effect boundary it also reserves the idempotency key.
 6. The adapter executes once and returns a bounded redacted result.
    The journal authenticates a receipt over that result.
 7. Adapter verification observes target state and evaluates every expected postcondition. Only all-pass
@@ -136,5 +141,6 @@ canonical roots. The desktop webview receives connection material through a narr
 is protected by a restrictive CSP; it is therefore security-sensitive presentation code, not an
 authority engine.
 
-See [VEP-0001](../protocol/VEP-0001.md), the [threat model](../security/threat-model.md), and the
-[ADRs](adr/) for normative detail and tradeoffs.
+See [VEP-0001](../protocol/VEP-0001.md), [VEP-0002](../protocol/VEP-0002.md), the
+[threat model](../security/threat-model.md), and the [ADRs](adr/) for normative detail and
+tradeoffs.

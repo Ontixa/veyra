@@ -124,8 +124,9 @@ pub struct Effect {
     pub inputs: EffectInputs,
     /// Exact resource affected.
     pub resource: ResourceScope,
-    /// Reserved preconditions. The V0.1 kernel rejects non-empty values until an explicit
-    /// adapter evaluation contract is available.
+    /// Preconditions evaluated against live state after preflight authority checks and before
+    /// staging or execution. Only the VEP-0002 `veyra.preconditions/v1` contract kinds are
+    /// meaningful here (`file_exists`, `file_sha256`); every other kind fails closed.
     pub preconditions: Vec<Condition>,
     /// Postconditions required for a committed transaction.
     pub expected_postconditions: Vec<Condition>,
@@ -203,10 +204,12 @@ pub enum ResourceScope {
     },
 }
 
-/// A typed condition vocabulary reserved for preconditions and evaluated for postconditions.
+/// A typed condition vocabulary evaluated for preconditions and postconditions.
 ///
-/// The V0.1 kernel rejects non-empty precondition lists until adapters have a versioned evaluation
-/// contract; supported postconditions are still evaluated after execution.
+/// Preconditions are governed by the VEP-0002 `veyra.preconditions/v1` contract: only
+/// `file_exists` and `file_sha256` are defined precondition kinds, evaluated inside the effect's
+/// declared resource scope before staging. Postconditions are evaluated after execution; each
+/// adapter declares which kinds it can check.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Condition {
@@ -628,6 +631,8 @@ pub enum TransactionState {
     Committed,
     /// Policy or a human denied execution.
     Denied,
+    /// A declared precondition was false or unevaluable before any side effect was attempted.
+    PreconditionFailed,
     /// Execution or verification failed.
     Failed,
     /// Recovery operations are running.
@@ -649,6 +654,7 @@ impl TransactionState {
             self,
             Self::Committed
                 | Self::Denied
+                | Self::PreconditionFailed
                 | Self::Failed
                 | Self::RolledBack
                 | Self::PartiallyCompensated
@@ -711,5 +717,22 @@ mod tests {
     fn unknown_effect_fields_are_rejected() {
         let value = serde_json::json!({"schema_version":"x","id":EffectId::new(),"extra":true});
         assert!(serde_json::from_value::<Effect>(value).is_err());
+    }
+
+    #[test]
+    fn precondition_failed_state_has_a_stable_wire_name() {
+        // The VEP-0002 refusal state is serialized as `precondition_failed`; clients must
+        // never see it collapse into a generic `failed` value.
+        let encoded = serde_json::to_value(TransactionState::PreconditionFailed).unwrap();
+        assert_eq!(encoded, serde_json::json!("precondition_failed"));
+        assert_eq!(
+            serde_json::from_value::<TransactionState>(encoded).unwrap(),
+            TransactionState::PreconditionFailed
+        );
+        assert!(TransactionState::PreconditionFailed.is_terminal());
+        assert_eq!(
+            crate::PRECONDITION_CONTRACT_VERSION,
+            "veyra.preconditions/v1"
+        );
     }
 }

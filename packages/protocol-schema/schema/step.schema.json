@@ -96,7 +96,7 @@
       ]
     },
     "Condition": {
-      "description": "A typed condition vocabulary reserved for preconditions and evaluated for postconditions.\n\nThe V0.1 kernel rejects non-empty precondition lists until adapters have a versioned evaluation\ncontract; supported postconditions are still evaluated after execution.",
+      "description": "A typed condition vocabulary evaluated for preconditions and postconditions.\n\nPreconditions are governed by the VEP-0002 `veyra.preconditions/v1` contract: only\n`file_exists` and `file_sha256` are defined precondition kinds, evaluated inside the effect's\ndeclared resource scope before staging. Postconditions are evaluated after execution; each\nadapter declares which kinds it can check.",
       "oneOf": [
         {
           "description": "A relative filesystem path must exist or not exist.",
@@ -262,7 +262,7 @@
           "type": "string"
         },
         "preconditions": {
-          "description": "Reserved preconditions. The V0.1 kernel rejects non-empty values until an explicit\nadapter evaluation contract is available.",
+          "description": "Preconditions evaluated against live state after preflight authority checks and before\nstaging or execution. Only the VEP-0002 `veyra.preconditions/v1` contract kinds are\nmeaningful here (`file_exists`, `file_sha256`); every other kind fails closed.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/Condition"

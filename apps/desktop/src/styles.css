@@ -406,6 +406,7 @@ pre {
 }
 
 .state-denied,
+.state-precondition_failed,
 .state-failed,
 .state-partially_compensated,
 .state-manual_recovery {

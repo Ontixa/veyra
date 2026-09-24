@@ -21,7 +21,10 @@ impl StateMachine {
                     S::AwaitingApproval | S::Approved | S::Denied | S::Failed | S::Cancelled
                 )
                 | (S::AwaitingApproval, S::Approved | S::Denied | S::Cancelled)
-                | (S::Approved, S::Staged | S::Failed | S::Cancelled)
+                | (
+                    S::Approved,
+                    S::Staged | S::PreconditionFailed | S::Failed | S::Cancelled
+                )
                 | (
                     S::Staged,
                     S::Executing | S::Compensating | S::Cancelled | S::Failed | S::ManualRecovery
@@ -86,7 +89,7 @@ impl StateMachine {
     /// their recovery artifacts must be retained. The answer is derived from the transition
     /// graph itself, so a future edge automatically disqualifies a state.
     pub fn is_final(state: TransactionState) -> bool {
-        const ALL: [TransactionState; 16] = [
+        const ALL: [TransactionState; 17] = [
             TransactionState::Draft,
             TransactionState::Planned,
             TransactionState::Preflighted,
@@ -97,6 +100,7 @@ impl StateMachine {
             TransactionState::Verifying,
             TransactionState::Committed,
             TransactionState::Denied,
+            TransactionState::PreconditionFailed,
             TransactionState::Failed,
             TransactionState::Compensating,
             TransactionState::RolledBack,
@@ -160,7 +164,7 @@ mod tests {
 
     use super::*;
 
-    const STATES: [TransactionState; 16] = [
+    const STATES: [TransactionState; 17] = [
         TransactionState::Draft,
         TransactionState::Planned,
         TransactionState::Preflighted,
@@ -171,6 +175,7 @@ mod tests {
         TransactionState::Verifying,
         TransactionState::Committed,
         TransactionState::Denied,
+        TransactionState::PreconditionFailed,
         TransactionState::Failed,
         TransactionState::Compensating,
         TransactionState::RolledBack,
@@ -219,6 +224,31 @@ mod tests {
     }
 
     #[test]
+    fn precondition_failure_is_an_explicit_approved_sink() {
+        let mut tx = transaction(TransactionState::Approved);
+        let revision = tx.revision;
+        StateMachine::transition(&mut tx, revision, TransactionState::PreconditionFailed).unwrap();
+        assert_eq!(tx.state, TransactionState::PreconditionFailed);
+        assert!(StateMachine::is_final(TransactionState::PreconditionFailed));
+        for next in STATES {
+            assert!(
+                !StateMachine::allows(TransactionState::PreconditionFailed, next),
+                "precondition failure has no outgoing edge to {next:?}"
+            );
+        }
+        // A precondition gate only exists immediately after approval: no other state can
+        // claim precondition failure.
+        for from in STATES {
+            if from != TransactionState::Approved {
+                assert!(
+                    !StateMachine::allows(from, TransactionState::PreconditionFailed),
+                    "{from:?} must not reach precondition_failed"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn stale_revision_cannot_mutate_state() {
         let mut tx = transaction(TransactionState::Draft);
         let original = tx.clone();
@@ -235,6 +265,7 @@ mod tests {
             let expected = matches!(
                 state,
                 TransactionState::Denied
+                    | TransactionState::PreconditionFailed
                     | TransactionState::RolledBack
                     | TransactionState::PartiallyCompensated
                     | TransactionState::Cancelled

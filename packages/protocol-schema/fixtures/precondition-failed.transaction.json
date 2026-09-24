@@ -1,0 +1,13 @@
+{
+  "schema_version": "veyra.protocol/v1",
+  "id": "7c4f2d41-0c9f-4f1d-9f6f-3c9d2c5d4b8a",
+  "intent_id": "ebc832ed-99f8-49f9-8c28-90360fcdf5c5",
+  "plan_id": "2f7a6f3e-5c2b-4a2d-9d4d-1a2b3c4d5e6f",
+  "state": "precondition_failed",
+  "effect_ids": ["0d5c6f0e-2c3a-4f6e-8b1d-9a7c6e5d4f3b"],
+  "receipt_ids": [],
+  "revision": 4,
+  "created_at": "2026-08-23T00:00:00Z",
+  "updated_at": "2026-08-23T00:00:05Z",
+  "manual_recovery_reason": null
+}

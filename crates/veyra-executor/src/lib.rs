@@ -144,6 +144,35 @@ pub trait EffectAdapter: Send + Sync {
         context: &AdapterContext,
     ) -> Result<AdapterResult, AdapterError>;
 
+    /// Evaluate every declared precondition against current state without mutating it.
+    ///
+    /// The kernel calls this once per effect after execution authority was rechecked and before
+    /// any capability use is consumed or effect is staged. Implementations must observe only
+    /// state inside the effect's declared resource scope, must not mutate, and must return one
+    /// check per declared precondition; a false condition is a successful return containing a
+    /// check whose `passed` field is false. Preconditions never widen authority — an adapter
+    /// must reject a condition it cannot evaluate inside the exact declared resource.
+    ///
+    /// The default implementation fails closed: adapters that do not implement precondition
+    /// evaluation must keep rejecting non-empty `preconditions` in `validate`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdapterError`] when a precondition cannot be observed safely. The kernel turns
+    /// any error or incomplete evidence into an honest precondition failure.
+    async fn check_preconditions(
+        &self,
+        effect: &Effect,
+        _context: &AdapterContext,
+    ) -> Result<Vec<VerificationCheck>, AdapterError> {
+        if effect.preconditions.is_empty() {
+            return Ok(vec![]);
+        }
+        Err(AdapterError::Precondition(
+            "adapter does not implement precondition evaluation".into(),
+        ))
+    }
+
     /// Check intrinsic adapter state and every declared postcondition.
     ///
     /// # Errors
