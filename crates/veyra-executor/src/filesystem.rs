@@ -1321,12 +1321,107 @@ fn write_new(directory: &Dir, path: &Path, content: &[u8]) -> Result<(), Adapter
         .map_err(|error| fs_error("sync staged file", path, error))
 }
 
+/// Result of attempting the OS-native no-replace rename.
+enum NativeRename {
+    /// The platform or filesystem provides no flag-aware rename; the
+    /// caller should fall back to the hard-link commit.
+    Unsupported,
+    /// The rename was attempted and failed. `AlreadyExists` (`EEXIST`)
+    /// lands here and means the destination name was occupied — the
+    /// operation is atomic, so neither directory entry was modified.
+    #[cfg_attr(
+        not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox",
+            target_vendor = "apple"
+        )),
+        allow(dead_code)
+    )]
+    Failed(std::io::Error),
+}
+
+/// Atomically rename `source_name` onto `destination_name` without ever
+/// replacing an existing destination, using the OS-native no-clobber
+/// rename: `renameat2(RENAME_NOREPLACE)` on Linux/Android/Redox and
+/// `renameatx_np(RENAME_EXCL)` on Apple targets. This is a single
+/// syscall, so unlike the hard-link-plus-unlink fallback it cannot
+/// leave both names behind after a partial failure, and it does not
+/// require the filesystem to support regular-file hard links (e.g.
+/// FAT, exFAT, some network and virtual filesystems).
+///
+/// Both path operands are interpreted relative to the already-opened
+/// capability directory handles, so the operation stays inside the
+/// anchored parents resolved by `open_parent_nofollow`.
+///
+/// Returns `Err(NativeRename::Unsupported)` when the kernel or
+/// filesystem reports that flag-aware rename is unavailable
+/// (`EINVAL`/`ENOSYS`/`ENOTSUP`), so callers can fall back to the
+/// hard-link commit.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox",
+    target_vendor = "apple"
+))]
+fn rename_noreplace_native(
+    source_parent: &Dir,
+    source_name: &std::ffi::OsStr,
+    destination_parent: &Dir,
+    destination_name: &std::ffi::OsStr,
+) -> Result<(), NativeRename> {
+    use rustix::fs::{RenameFlags, renameat_with};
+    use rustix::io::Errno;
+    use std::os::fd::AsFd;
+
+    match renameat_with(
+        source_parent.as_fd(),
+        source_name,
+        destination_parent.as_fd(),
+        destination_name,
+        RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if error == Errno::INVAL
+                || error == Errno::NOSYS
+                || error == Errno::NOTSUP
+                || error == Errno::OPNOTSUPP =>
+        {
+            Err(NativeRename::Unsupported)
+        }
+        Err(error) => Err(NativeRename::Failed(error.into())),
+    }
+}
+
+/// Stub for targets where `rustix` exposes no flag-aware rename
+/// (Windows, the BSDs, and other Unixes): the native path is always
+/// unavailable and `move_noreplace_anchored` uses the hard-link commit.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox",
+    target_vendor = "apple"
+)))]
+fn rename_noreplace_native(
+    _source_parent: &Dir,
+    _source_name: &std::ffi::OsStr,
+    _destination_parent: &Dir,
+    _destination_name: &std::ffi::OsStr,
+) -> Result<(), NativeRename> {
+    Err(NativeRename::Unsupported)
+}
+
 /// Move a regular file without ever replacing an existing destination.
 ///
-/// The hard-link creation is the atomic no-clobber point. Staging lives below
-/// the same capability root, so source and destination are on one filesystem.
-/// If unlinking the source fails, both names may remain and the caller receives
-/// an error for conservative recovery; an existing destination is never lost.
+/// The preferred backend is the OS-native no-replace rename, a single atomic
+/// syscall that also works on filesystems without regular-file hard links.
+/// Where the platform or filesystem provides no flag-aware rename, hard-link
+/// creation is the atomic no-clobber point instead. Staging lives below the
+/// same capability root, so source and destination are on one filesystem.
+/// If the fallback's source unlink fails, both names may remain and the caller
+/// receives an error for conservative recovery; an existing destination is
+/// never lost.
 fn move_noreplace_anchored(
     directory: &Dir,
     source: &Path,
@@ -1343,6 +1438,18 @@ fn move_noreplace_anchored(
             "`{}` is not a regular, non-symlink file",
             display_relative(source)
         )));
+    }
+    match rename_noreplace_native(
+        &source_parent,
+        source_name,
+        &destination_parent,
+        destination_name,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(NativeRename::Failed(error)) => {
+            return Err(fs_error(operation, destination, error));
+        }
+        Err(NativeRename::Unsupported) => {}
     }
     source_parent
         .hard_link(source_name, &destination_parent, destination_name)
@@ -1996,6 +2103,93 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(temp.path().join("notes/file.txt")).unwrap(),
             "concurrent writer"
+        );
+    }
+
+    #[test]
+    fn no_replace_move_moves_bytes_and_never_clobbers() {
+        let temp = TempDir::new().unwrap();
+        let root = Dir::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        std::fs::write(temp.path().join("from.txt"), "staged bytes").unwrap();
+
+        move_noreplace_anchored(
+            &root,
+            Path::new("from.txt"),
+            Path::new("to.txt"),
+            "move staged file",
+        )
+        .unwrap();
+        assert!(!temp.path().join("from.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("to.txt")).unwrap(),
+            "staged bytes"
+        );
+
+        std::fs::write(temp.path().join("second.txt"), "replacement").unwrap();
+        let error = move_noreplace_anchored(
+            &root,
+            Path::new("second.txt"),
+            Path::new("to.txt"),
+            "move staged file",
+        )
+        .unwrap_err();
+        assert!(matches!(error, AdapterError::Filesystem { .. }));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("to.txt")).unwrap(),
+            "staged bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("second.txt")).unwrap(),
+            "replacement"
+        );
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox",
+        target_vendor = "apple"
+    ))]
+    #[test]
+    fn native_no_replace_rename_moves_or_reports_unsupported() {
+        use std::ffi::OsStr;
+
+        let temp = TempDir::new().unwrap();
+        let root = Dir::open_ambient_dir(temp.path(), ambient_authority()).unwrap();
+        std::fs::write(temp.path().join("from.txt"), "staged bytes").unwrap();
+
+        match rename_noreplace_native(&root, OsStr::new("from.txt"), &root, OsStr::new("to.txt")) {
+            Ok(()) => {
+                assert!(!temp.path().join("from.txt").exists());
+                assert_eq!(
+                    std::fs::read_to_string(temp.path().join("to.txt")).unwrap(),
+                    "staged bytes"
+                );
+            }
+            Err(NativeRename::Unsupported) => {
+                assert!(temp.path().join("from.txt").exists());
+                assert!(!temp.path().join("to.txt").exists());
+            }
+            Err(NativeRename::Failed(error)) => {
+                panic!("native no-replace rename failed unexpectedly: {error}");
+            }
+        }
+
+        std::fs::write(temp.path().join("occupied.txt"), "keep me").unwrap();
+        std::fs::write(temp.path().join("another.txt"), "other").unwrap();
+        let outcome = rename_noreplace_native(
+            &root,
+            OsStr::new("another.txt"),
+            &root,
+            OsStr::new("occupied.txt"),
+        );
+        assert!(
+            !matches!(outcome, Ok(())),
+            "native no-replace rename must not replace an existing destination"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("occupied.txt")).unwrap(),
+            "keep me"
         );
     }
 

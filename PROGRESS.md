@@ -1432,3 +1432,50 @@ workspace, and VEP-0002 documents this explicitly rather than hiding it. A
 non-filesystem adapter that later implements `check_preconditions` must
 restate its own containment reasoning; only `file_exists`/`file_sha256`
 inside exact declared paths are contractually defined today.
+
+## 2026-09-24 - native no-replace filesystem commits
+
+- Delivered the ROADMAP no-replace-rename item: `move_noreplace_anchored` in
+  `crates/veyra-executor/src/filesystem.rs` now prefers the OS-native atomic
+  no-clobber rename — `renameat2(RENAME_NOREPLACE)` on Linux/Android/Redox and
+  `renameatx_np(RENAME_EXCL)` on Apple targets — through
+  `rustix::fs::renameat_with`. Both operands are resolved relative to the
+  already-opened capability directory handles produced by
+  `open_parent_nofollow`, so the confined-traversal and canonical-component
+  invariants are unchanged.
+- The native syscall is a single atomic operation: unlike the
+  hard-link-plus-unlink sequence it cannot leave both names behind when a
+  later step fails, and it does not require regular-file hard-link support,
+  so workspaces on filesystems such as FAT, exFAT, and some network or
+  virtual filesystems now get the same no-clobber commit. Where the platform
+  provides no flag-aware rename (Windows, BSDs) or the kernel/filesystem
+  reports it unavailable (`EINVAL`/`ENOSYS`/`ENOTSUP`), the adapter falls
+  back to the existing hard-link-plus-unlink commit; a destination that
+  exists always fails closed without being replaced on either path.
+- `rustix` was already in the dependency graph through `cap-std`; it is now
+  a direct target-scoped dependency of `veyra-executor` under the same cfg
+  as `rustix`'s own `renameat_with` availability, with the workspace
+  `unsafe_code = forbid` lint intact (the API is safe).
+- Added two executor unit tests: `no_replace_move_moves_bytes_and_never_clobbers`
+  (all platforms — byte-preserving move plus occupied-destination refusal with
+  source preserved) and, on native-rename targets,
+  `native_no_replace_rename_moves_or_reports_unsupported` (verifies the native
+  result or the honest unsupported signal, and that an occupied destination is
+  never replaced).
+
+Verification:
+
+```text
+cargo +1.96.0-x86_64-pc-windows-gnu check -p veyra-executor
+cargo +stable-x86_64-unknown-linux-gnu check -p veyra-executor   # WSL, native path
+cargo +stable-x86_64-unknown-linux-gnu test -p veyra-executor filesystem::
+```
+
+Results: the Windows GNU check compiles the fallback stub cleanly; the Linux
+check compiles the rustix path; all 23 filesystem tests pass on Linux
+including both new cases. The remaining workspace fmt/clippy/test and the
+pnpm/oss gates are exercised by CI on the pull request. Residual risk is
+unchanged in kind: platforms or filesystems where flag-aware rename is
+unavailable and hard links are unsupported still fail closed without
+replacing the destination; on such filesystems mutating effects remain
+unavailable rather than silently non-atomic.

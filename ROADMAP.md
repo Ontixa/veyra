@@ -50,7 +50,12 @@ execution boundary take priority over adapter count.
   UNC/`\\?\` spellings; this surfaced and fixed a name-alias bypass of the reserved `.veyra`
   directory (canonical-name enforcement in confined traversal). UNC workspace roots currently fail
   closed at adapter construction through cap-std relative opens
-- Native no-replace rename support for filesystems that do not provide regular-file hard links
+- ~~Native no-replace rename support for filesystems that do not provide regular-file hard links~~ —
+  delivered as a single-syscall atomic no-clobber commit through `renameat2(RENAME_NOREPLACE)` on
+  Linux-family kernels and `renameatx_np(RENAME_EXCL)` on Apple targets (via `rustix`), invoked
+  relative to the already-opened capability directory handles; filesystems or platforms without
+  flag-aware rename (`EINVAL`/`ENOSYS`/`ENOTSUP`, plus Windows and the BSDs) keep the existing
+  hard-link-plus-unlink commit
 - Removal of Tauri's advisory-bearing GTK3, `glib`, and `rust-unic` dependency paths when upstream
   supports maintained replacements
   ([tracking issue #4](https://github.com/Ontixa/veyra/issues/4))
