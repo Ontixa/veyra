@@ -12,6 +12,9 @@ cargo-fuzz = true
 arbitrary = { version = "=1.4.2", features = ["derive"] }
 libfuzzer-sys = "=0.4.13"
 serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+tempfile = "=3.27.0"
+veyra-executor = { path = "../crates/veyra-executor" }
 veyra-policy = { path = "../crates/veyra-policy" }
 veyra-protocol = { path = "../crates/veyra-protocol" }
 
@@ -25,6 +28,13 @@ bench = false
 [[bin]]
 name = "resource_scope"
 path = "fuzz_targets/resource_scope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filesystem_effect"
+path = "fuzz_targets/filesystem_effect.rs"
 test = false
 doc = false
 bench = false

@@ -1479,3 +1479,48 @@ unchanged in kind: platforms or filesystems where flag-aware rename is
 unavailable and hard links are unsupported still fail closed without
 replacing the destination; on such filesystems mutating effects remain
 unavailable rather than silently non-atomic.
+
+## 2026-09-24 - filesystem adapter staged-effect fuzz boundary
+
+- Added `fuzz/fuzz_targets/filesystem_effect.rs`, a third libFuzzer target on
+  the previously unfuzzed `veyra-executor` input surface. `Effect` JSON (raw
+  and merged over a valid baseline) is checked against
+  `FilesystemAdapter::validate` with an independent invariant oracle
+  (workspace binding, path count per operation, portable relative-path
+  containment, VEP-0002 condition kinds, secret-input and capability-caveat
+  rejection, risk floor, reversibility honesty, input byte bound).
+  `StagedEffect`/`FsStage` JSON is run through `execute`: a correctly bound
+  staging envelope carries a fuzz-merged `FsStage` payload so field-level
+  corruption reaches the adapter/effect-binding, content-digest, preview,
+  path, and transaction-stage-directory cross-checks before any filesystem
+  observation.
+- When every checked field still matches, the patch commit itself executes
+  inside a temporary capability-confined workspace; input-derived flags
+  additionally tamper with the staged `prepared` bytes and occupy the
+  `displaced` capture name so the digest recheck and the native/hard-link
+  no-replace rename (the surface just changed for filesystems without hard
+  links) are exercised adversarially. The oracle asserts rejection plus
+  source/collision preservation on corruption and byte-exact commit on
+  agreement.
+- `fuzz/Cargo.toml` registers the target with pinned `sha2 0.11.0` and
+  `tempfile 3.27.0`; `fuzz/README.md` records the boundary rationale per the
+  repository contract, and `.github/workflows/fuzz.yml` adds the matching
+  step since targets are enumerated explicitly, not auto-discovered.
+
+Verification (WSL stable + pinned nightly-2026-08-20, as on this host):
+
+```text
+cargo +stable-x86_64-unknown-linux-gnu check                 # fuzz workspace, zero warnings
+rustfmt --edition 2024 --check fuzz_targets/filesystem_effect.rs
+cargo +nightly-2026-08-20 fuzz run filesystem_effect -- \
+    -max_total_time=120 -timeout=10 -max_len=4096 -rss_limit_mb=2048
+```
+
+Results: 7,622 executions in 120 s (coverage 1,704 edges / 2,248 features)
+with no crash; four crafted seeds replay the commit, tampered-prepared,
+collision, and combined branches individually. One early finding was a
+harness-oracle defect (inverted move path-count expectation), fixed before
+the recorded run; no adapter defect was observed. Residual risk: the target
+holds one patch-operation fixture, so move/delete/create commit arms share
+the rename primitive but are not separately driven; per-input filesystem I/O
+keeps throughput near 60 exec/s under WSL `/mnt` (faster on CI ext4).
