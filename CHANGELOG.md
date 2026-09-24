@@ -64,6 +64,19 @@ Changelog conventions.
 - Made release recovery rebuild an existing immutable annotated tag from protected `main`, and
   replaced the default-branch-only Dependency Graph SBOM export with a full-SHA-pinned Syft scan of
   the exact release checkout.
+- Closed a filesystem-alias bypass in the confined filesystem adapter. On filesystems whose name
+  lookup is case-insensitive or honors 8.3 short-name aliases (NTFS defaults on many Windows
+  volumes), a component such as `NOTES` or `VEYRA~1` could resolve to `notes` or the reserved
+  `.veyra` directory without ever appearing under that spelling in the parent enumeration. Every
+  traversed or leaf component that resolves must now match a recorded directory entry verbatim, so
+  aliased paths fail closed instead of reaching internal staging state or being recorded under a
+  non-canonical name. Effect paths must therefore use each entry's exact on-disk spelling.
+- Added Windows reparse-point and name-resolution adversarial coverage: directory junctions (which
+  need no privilege) are refused at every phase including a swap-in between staging and execution,
+  junctions inside collectible staging trees are unlinked without being descended, adapter
+  construction refuses a `.veyra` junction, symlinks are refused where the host can create them
+  (skipped with a printed reason otherwise), and reserved device names, alternate data streams,
+  trailing dot/space, UNC, and `\\?\` spellings are rejected lexically.
 
 ## [0.1.0] - 2026-08-24
 

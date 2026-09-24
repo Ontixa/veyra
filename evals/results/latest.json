@@ -1,35 +1,35 @@
 {
   "schema_version": "veyra.eval-results/v1",
-  "started_at": "2026-09-23T20:23:52.816Z",
-  "completed_at": "2026-09-23T20:26:16.585Z",
+  "started_at": "2026-09-24T02:39:44.954Z",
+  "completed_at": "2026-09-24T03:06:42.195Z",
   "environment": {
     "platform": "win32",
     "architecture": "x64",
-    "rust_toolchain": "stable-x86_64-pc-windows-gnu",
+    "rust_toolchain": "1.96.0-x86_64-pc-windows-gnu",
     "node": "v24.14.1"
   },
   "summary": {
-    "total": 69,
-    "passed": 67,
+    "total": 75,
+    "passed": 73,
     "environment_limited": 2,
     "failed": 0
   },
   "gates": {
     "rust": {
       "exit_code": 0,
-      "duration_ms": 109499
+      "duration_ms": 452520
     },
     "typescript": {
       "exit_code": 0,
-      "duration_ms": 19394
+      "duration_ms": 21777
     },
     "desktop": {
       "exit_code": 0,
-      "duration_ms": 5048
+      "duration_ms": 16758
     },
     "demo": {
       "exit_code": 0,
-      "duration_ms": 9824
+      "duration_ms": 1126182
     }
   },
   "results": [
@@ -996,6 +996,90 @@
         "gate": "rust",
         "probe": "staging_sweep_never_descends_into_links",
         "probe_observed": false,
+        "command_exit_code": 0
+      }
+    },
+    {
+      "id": "EV-070",
+      "category": "symlink_escape",
+      "title": "Junction components never escape the workspace",
+      "expected": "containment_error",
+      "status": "passed",
+      "environment_limitation": null,
+      "evidence": {
+        "gate": "rust",
+        "probe": "junction_components_never_escape_the_workspace",
+        "probe_observed": true,
+        "command_exit_code": 0
+      }
+    },
+    {
+      "id": "EV-071",
+      "category": "toctou",
+      "title": "A junction swapped in after staging fails execution and rollback",
+      "expected": "containment_error",
+      "status": "passed",
+      "environment_limitation": null,
+      "evidence": {
+        "gate": "rust",
+        "probe": "junction_swapped_in_after_staging_fails_every_later_phase",
+        "probe_observed": true,
+        "command_exit_code": 0
+      }
+    },
+    {
+      "id": "EV-072",
+      "category": "symlink_escape",
+      "title": "Staging sweep unlinks but never descends into junctions",
+      "expected": "link_targets_untouched",
+      "status": "passed",
+      "environment_limitation": null,
+      "evidence": {
+        "gate": "rust",
+        "probe": "staging_sweep_never_descends_into_junctions",
+        "probe_observed": true,
+        "command_exit_code": 0
+      }
+    },
+    {
+      "id": "EV-073",
+      "category": "canonical_input",
+      "title": "Case-folded path components fail closed instead of resolving",
+      "expected": "containment_error",
+      "status": "passed",
+      "environment_limitation": null,
+      "evidence": {
+        "gate": "rust",
+        "probe": "case_alias_components_fail_closed",
+        "probe_observed": true,
+        "command_exit_code": 0
+      }
+    },
+    {
+      "id": "EV-074",
+      "category": "canonical_input",
+      "title": "8.3 aliases of the reserved .veyra directory fail closed",
+      "expected": "containment_error",
+      "status": "passed",
+      "environment_limitation": null,
+      "evidence": {
+        "gate": "rust",
+        "probe": "internal_directory_8_3_alias_fails_closed",
+        "probe_observed": true,
+        "command_exit_code": 0
+      }
+    },
+    {
+      "id": "EV-075",
+      "category": "symlink_escape",
+      "title": "Windows symlink components fail closed when creatable",
+      "expected": "containment_error",
+      "status": "passed",
+      "environment_limitation": null,
+      "evidence": {
+        "gate": "rust",
+        "probe": "symlink_components_fail_closed_when_creatable",
+        "probe_observed": true,
         "command_exit_code": 0
       }
     }

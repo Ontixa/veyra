@@ -1231,3 +1231,80 @@ same-account trust domain and a hostile writer can keep staging trees alive
 by racing the walker. Journal eligibility is a point-in-time snapshot; a
 state recorded as final cannot later resume by definition of the transition
 graph, so stale snapshots can only retain, never wrongly collect.
+
+## 2026-09-24 - Windows reparse-point and name-alias adversarial coverage
+
+- Broader Windows adversarial testing of the filesystem adapter (the ROADMAP
+  reparse-point/network-filesystem item) added ten executor cases covering
+  junction traversal, junctions planted inside the workspace pointing outside
+  and inside, a junction swapped into a staged path between phases, a junction
+  reached at adapter construction, the retention sweep refusing to descend into
+  junctions, Windows symlink behavior when creatable, a loopback UNC workspace
+  probe, and name-alias attacks.
+- The coverage exposed a real containment weakness on Windows: the reserved
+  `.veyra` check and component traversal were lexical/name-based, so Windows
+  name-resolution aliases resolved to real entries. A case-folded spelling such
+  as `NOTES` reached `notes`, and an 8.3 short name such as `VEYRA~1` reached
+  `.veyra` on volumes that mint short names, bypassing the reserved-namespace
+  check and desynchronizing audit paths from on-disk names.
+- Fixed minimally at the adapter boundary: a new `require_canonical_component`
+  helper in `crates/veyra-executor/src/filesystem.rs` confirms every existing
+  component appears verbatim in its parent's directory enumeration before the
+  no-follow open proceeds. It is invoked from `open_parent_nofollow`,
+  `open_directory_nofollow`, and `open_or_create_directory_nofollow`, so the
+  recheck applies uniformly to preflight, staging, execution, verification,
+  rollback, and the retention sweep. Non-existent components still pass through
+  to the creation path; aliases fail closed with `AdapterError::Containment`.
+- Host probing found junction creation works unprivileged; file and directory
+  symlinks require Developer Mode/`SeCreateSymbolicLinkPrivilege`, which this
+  host lacks, so `symlink_components_fail_closed_when_creatable` prints an
+  `eprintln!` reason and returns early when creation is denied. No writable
+  loopback UNC share was reachable; adapter construction on UNC roots fails
+  closed here, which the test reports rather than asserts away. 8.3 short names
+  are enabled on C: but disabled on D:, so the alias tests locate a
+  short-name-capable directory under `%LOCALAPPDATA%` and skip visibly if none
+  exists.
+- Eval scenarios EV-070 through EV-075 bind the new tests to the `rust` gate
+  probes; EV-008 and EV-069 remain environment-limited by the pre-existing
+  unprivileged-symlink limitation.
+- Docs updated: `docs/security/threat-model.md` records the exact-spelling
+  control, the alias residual-risk statement, and the bounded per-component
+  enumeration cost; `CHANGELOG.md` records the fix and coverage under
+  Unreleased; `ROADMAP.md` marks the item delivered.
+
+Verification on this Windows host (pinned GNU Rust 1.96.0, invoked as
+`cargo +1.96.0-x86_64-pc-windows-gnu`; MSVC linker absent as documented):
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+VEYRA_RUST_TOOLCHAIN=1.96.0-x86_64-pc-windows-gnu ./scripts/verify.ps1
+```
+
+Results: `fmt --check`, `clippy -D warnings`, and `cargo doc -D warnings` are
+clean. The workspace test suite passed all 145 tests across 12 binaries,
+including the 10 new executor adversarial tests; `verify.ps1` completed
+end-to-end with exit code 0: 16 generated schemas verified with no drift,
+`cargo deny` passed (the unused `NCSA` allowance warning is pre-existing),
+`oss:check` 520 assertions, `release:check` 27, `pnpm format`/`check`/`lint`/
+`test`/`build`/`package:check`/`audit` clean, and the demo committed, verified,
+and rolled back with 41 audit events. Evals: 73 passed, 2 environment-limited
+(EV-008 and EV-069, the documented unprivileged-Windows symlink cases), 0
+failed; `evals/results/latest.json` refreshed with this run's evidence.
+
+Failed runs recorded: two `verify.ps1` attempts were interrupted before
+completion — the first by a Prettier table-width reformat needed in
+`docs/security/threat-model.md` (applied, now clean), the second by a vitest
+forks-pool worker start timeout in `apps/desktop` while the host was saturated
+by parallel GNU link jobs; the same test passed in 3-4s standalone once the
+host was quiet and inside the final green `verify.ps1` run.
+
+Residual risk: exotic non-name-surrogate reparse tags (e.g. future Windows
+reparse types that resolve a path without a matching directory entry spelling)
+and per-host network filesystem behavior still depend on the OS honoring
+`FILE_FLAG_OPEN_REPARSE_POINT` semantics through cap-std; UNC roots fail closed
+on this host but no reachable SMB share was available to exercise a
+success-path workspace. The exact-spelling check adds one bounded parent
+enumeration per path component, proportional to sibling count.

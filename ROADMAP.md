@@ -38,7 +38,13 @@ execution boundary take priority over adapter count.
   SDK examples (`packages/sdk-typescript/examples/`): a minimal MCP-shaped stdio tool surface gated
   by Veyra capability/approval policy, and an A2A-shaped task result whose receipt claim is
   reconciled against the authoritative journal
-- Broader Windows reparse-point and network-filesystem adversarial testing
+- ~~Broader Windows reparse-point and network-filesystem adversarial testing~~ — delivered as
+  executor adversarial tests covering junctions (traversal, leaf, swap-in TOCTOU, staging sweep,
+  adapter construction, junction-reached roots), symlinks where creatable, 8.3 short-name and
+  case-fold aliases, reserved device names, alternate data streams, trailing dot/space, and
+  UNC/`\\?\` spellings; this surfaced and fixed a name-alias bypass of the reserved `.veyra`
+  directory (canonical-name enforcement in confined traversal). UNC workspace roots currently fail
+  closed at adapter construction through cap-std relative opens
 - Native no-replace rename support for filesystems that do not provide regular-file hard links
 - Removal of Tauri's advisory-bearing GTK3, `glib`, and `rust-unic` dependency paths when upstream
   supports maintained replacements
