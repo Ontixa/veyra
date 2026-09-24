@@ -46,3 +46,9 @@ jobs:
           cargo +nightly-2026-08-20 fuzz run resource_scope --
           -max_total_time=${VEYRA_FUZZ_SECONDS} -timeout=10 -max_len=4096
           -rss_limit_mb=2048
+
+      - name: Fuzz filesystem adapter effect boundary
+        run: >-
+          cargo +nightly-2026-08-20 fuzz run filesystem_effect --
+          -max_total_time=${VEYRA_FUZZ_SECONDS} -timeout=10 -max_len=4096
+          -rss_limit_mb=2048
