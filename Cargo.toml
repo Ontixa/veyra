@@ -38,6 +38,7 @@ proptest = "1.11.0"
 rand = "0.10.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "chrono"] }
+rustix = { version = "1.1.4", features = ["fs"] }
 schemars = { version = "1.2.2", features = ["chrono04", "uuid1"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_jcs = "0.2.0"

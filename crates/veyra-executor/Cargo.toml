@@ -28,6 +28,13 @@ url.workspace = true
 veyra-protocol = { version = "0.1.0", path = "../veyra-protocol" }
 zeroize.workspace = true
 
+# Native no-replace rename (`renameat2(RENAME_NOREPLACE)` /
+# `renameatx_np(RENAME_EXCL)`) — the primitive used on filesystems that
+# do not provide regular-file hard links. Same cfg as `rustix`'s own
+# `renameat_with` availability.
+[target.'cfg(any(target_os = "linux", target_os = "android", target_os = "redox", target_vendor = "apple"))'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
