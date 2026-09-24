@@ -32,7 +32,12 @@ execution boundary take priority over adapter count.
   audit events; configured via `RuntimeConfig::staging_retention` or `--staging-retention-days`
 - Cursor pagination/streaming for high-volume audit verification; transaction, audit-event/export,
   recovery, and per-transaction bundle event pages are implemented
-- A versioned precondition-evaluation contract; V0.1 deliberately rejects non-empty preconditions
+- ~~A versioned precondition-evaluation contract; V0.1 deliberately rejects non-empty
+  preconditions~~ — delivered as the bounded `veyra.preconditions/v1` contract
+  (`docs/protocol/VEP-0002.md`): filesystem `file_exists`/`file_sha256` conditions evaluated
+  after the live-authority recheck and before any staging or authority consumption, exact
+  declared-path containment, fail-closed unknown kinds, journaled `effect.preconditions_evaluated`
+  evidence, and the terminal `precondition_failed` outcome
 - An authenticated audit anchor outside SQLite or optional remote transparency sink
 - ~~First-class MCP interception example and A2A receipt exchange example~~ — delivered as runnable
   SDK examples (`packages/sdk-typescript/examples/`): a minimal MCP-shaped stdio tool surface gated

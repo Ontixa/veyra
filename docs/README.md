@@ -2,6 +2,7 @@
 
 - [Architecture](architecture/README.md)
 - [VEP-0001 protocol](protocol/VEP-0001.md)
+- [VEP-0002 precondition contract](protocol/VEP-0002.md)
 - [Threat model](security/threat-model.md)
 - [API and CLI reference](api-cli-reference.md)
 - [Adapter authoring](contributing/adapter-authoring.md)

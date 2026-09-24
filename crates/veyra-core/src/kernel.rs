@@ -44,7 +44,7 @@ pub struct KernelConfig {
     pub maximum_effects_per_plan: usize,
     /// Maximum public/secret-ref input entries accepted in one effect.
     pub maximum_inputs_per_effect: usize,
-    /// Maximum declared postconditions accepted in one effect. V0.1 rejects preconditions.
+    /// Maximum declared preconditions and postconditions accepted in one effect.
     pub maximum_conditions_per_effect: usize,
     /// Maximum capability requirements accepted in one effect.
     pub maximum_requirements_per_effect: usize,
@@ -197,6 +197,7 @@ impl Kernel {
                     | TransactionState::RolledBack
                     | TransactionState::PartiallyCompensated
                     | TransactionState::Cancelled
+                    | TransactionState::PreconditionFailed
                     | TransactionState::ManualRecovery => {}
                 }
             }
@@ -829,6 +830,9 @@ impl Kernel {
             .journal
             .get_object("preflighted_plan", &transaction.plan_id.to_string())?;
         let authority = self.authorize_for_execution(&transaction, &plan)?;
+        if let Some(refused) = self.evaluate_preconditions(&mut transaction, &plan).await? {
+            return Ok(refused);
+        }
         let staged_effects = self
             .stage_effects(&mut transaction, &plan, authority)
             .await?;
@@ -876,6 +880,81 @@ impl Kernel {
             recoveries: vec![],
             committed: true,
         })
+    }
+
+    /// Evaluate every declared precondition against live state before any side-effect boundary.
+    ///
+    /// Runs after execution authority was rechecked and before any capability use, approval
+    /// nonce, idempotency reservation, or staging evidence is consumed. Each declared
+    /// precondition is a VEP-0002 `veyra.preconditions/v1` observation inside the effect's
+    /// declared resource, evaluated by its adapter under the same no-follow containment used
+    /// for postconditions. A false condition, an adapter error, and malformed adapter evidence
+    /// all fail closed: the transaction records `effect.preconditions_evaluated` per evaluated
+    /// effect, transitions `approved → precondition_failed` once, and no effect stages or
+    /// executes. Evaluation is a point-in-time gate, not a lock on the workspace; staging and
+    /// execution still re-observe state under their own TOCTOU checks.
+    async fn evaluate_preconditions(
+        &self,
+        transaction: &mut Transaction,
+        plan: &Plan,
+    ) -> Result<Option<RunOutcome>, KernelError> {
+        let mut failed_effects = Vec::new();
+        for effect in effects(plan) {
+            if effect.preconditions.is_empty() {
+                continue;
+            }
+            let checks = match self
+                .adapters
+                .get(&effect.adapter)?
+                .check_preconditions(effect, &self.adapter_context(transaction.id))
+                .await
+            {
+                Ok(checks) => match validate_precondition_checks(
+                    effect,
+                    &checks,
+                    self.config.maximum_adapter_evidence_bytes,
+                ) {
+                    Ok(()) => checks,
+                    Err(_) => {
+                        vec![adapter_precondition_failure(
+                            "malformed_adapter_preconditions",
+                        )]
+                    }
+                },
+                Err(error) => vec![adapter_precondition_failure(error.code())],
+            };
+            let passed = !checks.is_empty() && checks.iter().all(|check| check.passed);
+            self.journal.append_event(
+                Some(transaction.id),
+                "effect.preconditions_evaluated",
+                Some(&effect.id.to_string()),
+                json!({
+                    "effect_id": effect.id,
+                    "contract": veyra_protocol::PRECONDITION_CONTRACT_VERSION,
+                    "passed": passed,
+                    "checks": checks,
+                }),
+            )?;
+            if !passed {
+                failed_effects.push(effect.id);
+            }
+        }
+        if failed_effects.is_empty() {
+            return Ok(None);
+        }
+        self.transition(
+            transaction,
+            TransactionState::PreconditionFailed,
+            "transaction.precondition_failed",
+            json!({"failed_effects": failed_effects}),
+        )?;
+        Ok(Some(RunOutcome {
+            transaction: transaction.clone(),
+            receipts: vec![],
+            verifications: vec![],
+            recoveries: vec![],
+            committed: false,
+        }))
     }
 
     async fn stage_effects(
@@ -1282,7 +1361,8 @@ impl Kernel {
                     || effect.inputs.len() > self.config.maximum_inputs_per_effect
                     || !effect.inputs.keys().all(|key| valid_public_key(key, 256))
                     || !effect_inputs_are_safe(&effect.inputs)
-                    || !effect.preconditions.is_empty()
+                    || effect.preconditions.len() > self.config.maximum_conditions_per_effect
+                    || !preconditions_are_valid(&effect.preconditions)
                     || effect.expected_postconditions.is_empty()
                     || effect.expected_postconditions.len()
                         > self.config.maximum_conditions_per_effect
@@ -2172,6 +2252,55 @@ fn validate_adapter_preflight(
     validate_adapter_evidence_size(preflight, limit, "adapter preflight")
 }
 
+/// Fail-closed VEP-0002 `veyra.preconditions/v1` surface validation.
+///
+/// Only deterministic local-state observations are valid precondition kinds. `http_status`,
+/// `output_sha256`, and `custom` describe the outcome of a side effect that has not happened
+/// yet, so a plan declaring them as preconditions is invalid rather than silently skipped.
+/// Path validity here is shape-only; containment to the effect's declared resource is
+/// re-enforced by the adapter at evaluation time.
+fn preconditions_are_valid(conditions: &[Condition]) -> bool {
+    conditions.iter().enumerate().all(|(index, condition)| {
+        !conditions[..index].contains(condition)
+            && match condition {
+                Condition::FileExists { path, .. } => valid_bounded_text(path, 4_096),
+                Condition::FileSha256 { path, digest } => {
+                    valid_bounded_text(path, 4_096) && valid_sha256(digest)
+                }
+                Condition::HttpStatus { .. }
+                | Condition::OutputSha256 { .. }
+                | Condition::Custom { .. } => false,
+            }
+    })
+}
+
+fn validate_precondition_checks(
+    effect: &Effect,
+    checks: &[veyra_protocol::VerificationCheck],
+    limit: usize,
+) -> Result<(), KernelError> {
+    if checks.len() != effect.preconditions.len()
+        || effect
+            .preconditions
+            .iter()
+            .any(|condition| !checks.iter().any(|check| check.condition == *condition))
+    {
+        return Err(KernelError::Invariant(
+            "adapter precondition evidence is incomplete or mismatched".into(),
+        ));
+    }
+    let parameters = checks.iter().filter_map(|check| match &check.condition {
+        veyra_protocol::Condition::Custom { parameters, .. } => Some(parameters),
+        _ => None,
+    });
+    if !json_values_have_safe_shape(parameters) {
+        return Err(KernelError::Invariant(
+            "adapter precondition JSON is excessively deep or complex".into(),
+        ));
+    }
+    validate_adapter_evidence_size(&checks, limit, "adapter precondition")
+}
+
 fn validate_verification_checks(
     effect: &Effect,
     checks: &[veyra_protocol::VerificationCheck],
@@ -2237,6 +2366,21 @@ fn adapter_verification_failure(code: &str) -> veyra_protocol::VerificationCheck
         },
         passed: false,
         message: format!("adapter verification failed safely ({code})"),
+    }
+}
+
+/// Safe, bounded check row recorded when the adapter could not produce trustworthy
+/// precondition evidence (unsupported adapter, containment breach, I/O error, malformed
+/// evidence). `passed: false` turns every such failure into a refusal, never a crash, a
+/// silent skip, or a false pass.
+fn adapter_precondition_failure(code: &str) -> veyra_protocol::VerificationCheck {
+    veyra_protocol::VerificationCheck {
+        condition: veyra_protocol::Condition::Custom {
+            name: "veyra.adapter.precondition_error/v1".into(),
+            parameters: json!({"error_code": code}),
+        },
+        passed: false,
+        message: format!("adapter precondition evaluation failed safely ({code})"),
     }
 }
 
@@ -2340,28 +2484,70 @@ mod tests {
         }
     }
 
-    fn kernel() -> (TempDir, Kernel, Principal, Principal) {
+    /// Planner fixture that attaches the same declared precondition list to every effect, so
+    /// tests can exercise the VEP-0002 gate without changing the trusted planner boundary.
+    struct PreconditionPlanner(Vec<Condition>);
+
+    #[async_trait::async_trait]
+    impl Planner for PreconditionPlanner {
+        fn name(&self) -> &'static str {
+            "fixture/v1"
+        }
+
+        async fn plan(&self, intent: &Intent) -> Result<Plan, PlannerError> {
+            let mut plan = FixturePlanner.plan(intent).await?;
+            for effect in effects_mut(&mut plan) {
+                effect.preconditions = self.0.clone();
+            }
+            Ok(plan)
+        }
+    }
+
+    fn new_workspace() -> TempDir {
         let temp = TempDir::new().unwrap();
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).unwrap();
+        std::fs::create_dir_all(temp.path().join("workspace/notes")).unwrap();
+        temp
+    }
+
+    fn kernel() -> (TempDir, Kernel, Principal, Principal) {
+        kernel_on(new_workspace(), Arc::new(FixturePlanner), None)
+    }
+
+    fn kernel_with_preconditions(
+        preconditions: Vec<Condition>,
+    ) -> (TempDir, Kernel, Principal, Principal) {
+        kernel_on(
+            new_workspace(),
+            Arc::new(PreconditionPlanner(preconditions)),
+            None,
+        )
+    }
+
+    fn kernel_on(
+        temp: TempDir,
+        planner: Arc<dyn Planner>,
+        adapter: Option<Arc<dyn veyra_executor::EffectAdapter>>,
+    ) -> (TempDir, Kernel, Principal, Principal) {
         let journal = Journal::in_memory([9; 32]).unwrap();
         let mut adapters = AdapterRegistry::new();
         adapters
-            .register(Arc::new(
-                FilesystemAdapter::new(FilesystemConfig {
-                    workspace_name: "demo".into(),
-                    root: workspace,
-                    maximum_file_bytes: 1024 * 1024,
-                    maximum_diff_bytes: 64 * 1024,
-                })
-                .unwrap(),
-            ))
+            .register(adapter.unwrap_or_else(|| {
+                Arc::new(
+                    FilesystemAdapter::new(FilesystemConfig {
+                        workspace_name: "demo".into(),
+                        root: temp.path().join("workspace"),
+                        maximum_file_bytes: 1024 * 1024,
+                        maximum_diff_bytes: 64 * 1024,
+                    })
+                    .unwrap(),
+                )
+            }))
             .unwrap();
         let kernel = Kernel::new(
             journal,
             PolicyEngine::new(PolicyConfig::default()),
             adapters,
-            Arc::new(FixturePlanner),
+            planner,
             Arc::new(DenySecretResolver),
             KernelConfig::default(),
         );
@@ -2506,6 +2692,259 @@ mod tests {
         assert_eq!(rollback.transaction.state, TransactionState::RolledBack);
         assert!(!created.exists());
         assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    async fn approved(kernel: &Kernel, human: &Principal, submission: &Submission) {
+        let preview = kernel
+            .preview_transaction(submission.transaction.id)
+            .await
+            .unwrap();
+        for request in &preview.approval_requests {
+            kernel.grant_approval(request.id, human.id).await.unwrap();
+        }
+        assert_eq!(
+            kernel
+                .journal()
+                .transaction(submission.transaction.id)
+                .unwrap()
+                .state,
+            TransactionState::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn satisfied_precondition_commits_with_journaled_evaluation() {
+        let (temp, kernel, human, agent) = kernel_with_preconditions(vec![Condition::FileExists {
+            path: "notes/hello.txt".into(),
+            expected: false,
+        }]);
+        let submission = kernel.submit_intent(intent(&agent)).await.unwrap();
+        kernel
+            .issue_capability(human.id, &capability(&human, &agent, &submission))
+            .unwrap();
+        approved(&kernel, &human, &submission).await;
+
+        let run = kernel
+            .run_transaction(submission.transaction.id)
+            .await
+            .unwrap();
+
+        assert!(run.committed);
+        assert_eq!(run.transaction.state, TransactionState::Committed);
+        assert!(temp.path().join("workspace/notes/hello.txt").exists());
+        let events = kernel
+            .journal()
+            .export_events(Some(submission.transaction.id))
+            .unwrap();
+        let evaluation = events
+            .iter()
+            .find(|event| event.event_type == "effect.preconditions_evaluated")
+            .expect("precondition evaluation must be journaled");
+        assert_eq!(
+            evaluation.payload["contract"],
+            json!(veyra_protocol::PRECONDITION_CONTRACT_VERSION)
+        );
+        assert_eq!(evaluation.payload["passed"], json!(true));
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn false_precondition_fails_closed_before_any_side_effect() {
+        let (temp, kernel, human, agent) = kernel_with_preconditions(vec![Condition::FileExists {
+            path: "notes/hello.txt".into(),
+            expected: true,
+        }]);
+        let submission = kernel.submit_intent(intent(&agent)).await.unwrap();
+        kernel
+            .issue_capability(human.id, &capability(&human, &agent, &submission))
+            .unwrap();
+        approved(&kernel, &human, &submission).await;
+
+        let run = kernel
+            .run_transaction(submission.transaction.id)
+            .await
+            .unwrap();
+
+        assert!(!run.committed);
+        assert_eq!(run.transaction.state, TransactionState::PreconditionFailed);
+        assert!(
+            run.receipts.is_empty() && run.verifications.is_empty() && run.recoveries.is_empty()
+        );
+        assert!(!temp.path().join("workspace/notes/hello.txt").exists());
+        let persisted = kernel
+            .journal()
+            .transaction(submission.transaction.id)
+            .unwrap();
+        assert_eq!(persisted.state, TransactionState::PreconditionFailed);
+
+        // Authority was rechecked but never consumed, and nothing staged, reserved, or ran.
+        let events = kernel
+            .journal()
+            .export_events(Some(submission.transaction.id))
+            .unwrap();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        let evaluation = events
+            .iter()
+            .find(|event| event.event_type == "effect.preconditions_evaluated")
+            .expect("precondition evaluation must be journaled");
+        assert_eq!(evaluation.payload["passed"], json!(false));
+        assert!(
+            evaluation.payload["checks"]
+                .as_array()
+                .is_some_and(|checks| checks.iter().all(|check| check["passed"] == false))
+        );
+        assert!(kinds.contains(&"transaction.precondition_failed"));
+        for forbidden in [
+            "transaction.staging",
+            "effect.staged",
+            "stage.stored",
+            "capability.consumed",
+            "approval.consumed",
+            "idempotency.reserved",
+            "transaction.executing",
+            "effect.executed",
+            "transaction.committed",
+        ] {
+            assert!(
+                !kinds.contains(&forbidden),
+                "{forbidden} must not appear on a precondition_failed transaction"
+            );
+        }
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+        // precondition_failed is terminal: re-running is rejected rather than re-evaluated.
+        assert!(
+            kernel
+                .run_transaction(submission.transaction.id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn precondition_evaluation_never_runs_after_capability_revocation() {
+        let (temp, kernel, human, agent) = kernel_with_preconditions(vec![Condition::FileExists {
+            path: "notes/hello.txt".into(),
+            expected: true,
+        }]);
+        let submission = kernel.submit_intent(intent(&agent)).await.unwrap();
+        let granted = capability(&human, &agent, &submission);
+        kernel.issue_capability(human.id, &granted).unwrap();
+        approved(&kernel, &human, &submission).await;
+
+        // The human revokes authority between approval and execution; the run must fail
+        // closed at the live authorization re-check, before any precondition observation.
+        kernel.revoke_capability(human.id, granted.id).unwrap();
+        assert!(matches!(
+            kernel.run_transaction(submission.transaction.id).await,
+            Err(KernelError::Authority(_))
+        ));
+        assert_eq!(
+            kernel
+                .journal()
+                .transaction(submission.transaction.id)
+                .unwrap()
+                .state,
+            TransactionState::Approved
+        );
+        assert!(!temp.path().join("workspace/notes/hello.txt").exists());
+        let events = kernel
+            .journal()
+            .export_events(Some(submission.transaction.id))
+            .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "effect.preconditions_evaluated"),
+            "revoked authority must fail before precondition evaluation"
+        );
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn adapter_precondition_errors_and_bad_evidence_fail_closed() {
+        // EmptyVerificationAdapter never overrides `check_preconditions`, so the trait's
+        // fail-closed default answers; the kernel must turn that error into an honest
+        // precondition failure, not a crash or a skipped gate.
+        let temp = new_workspace();
+        let inner = FilesystemAdapter::new(FilesystemConfig {
+            workspace_name: "demo".into(),
+            root: temp.path().join("workspace"),
+            maximum_file_bytes: 1024 * 1024,
+            maximum_diff_bytes: 64 * 1024,
+        })
+        .unwrap();
+        let (temp, kernel, human, agent) = kernel_on(
+            temp,
+            Arc::new(PreconditionPlanner(vec![Condition::FileExists {
+                path: "notes/hello.txt".into(),
+                expected: false,
+            }])),
+            Some(Arc::new(EmptyVerificationAdapter(inner))),
+        );
+        let submission = kernel.submit_intent(intent(&agent)).await.unwrap();
+        kernel
+            .issue_capability(human.id, &capability(&human, &agent, &submission))
+            .unwrap();
+        approved(&kernel, &human, &submission).await;
+
+        let run = kernel
+            .run_transaction(submission.transaction.id)
+            .await
+            .unwrap();
+
+        assert!(!run.committed);
+        assert_eq!(run.transaction.state, TransactionState::PreconditionFailed);
+        let events = kernel
+            .journal()
+            .export_events(Some(submission.transaction.id))
+            .unwrap();
+        let evaluation = events
+            .iter()
+            .find(|event| event.event_type == "effect.preconditions_evaluated")
+            .expect("the safe adapter failure must be journaled");
+        assert_eq!(
+            evaluation.payload["checks"][0]["condition"]["name"],
+            json!("veyra.adapter.precondition_error/v1")
+        );
+        assert!(!temp.path().join("workspace/notes/hello.txt").exists());
+        assert!(kernel.journal().verify_chain().unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn malformed_adapter_precondition_evidence_is_rejected() {
+        let (_temp, _kernel, _human, agent) = kernel();
+        let mut effect =
+            FixturePlanner.plan(&intent(&agent)).await.unwrap().steps[0].effects[0].clone();
+        effect.preconditions = vec![Condition::FileExists {
+            path: "notes/hello.txt".into(),
+            expected: false,
+        }];
+        // Missing, mismatched, and oversized evidence are all rejected before trust.
+        assert!(validate_precondition_checks(&effect, &[], 1024).is_err());
+        let mismatched = vec![veyra_protocol::VerificationCheck {
+            condition: Condition::FileExists {
+                path: "notes/other.txt".into(),
+                expected: false,
+            },
+            passed: true,
+            message: "does not answer the declared condition".into(),
+        }];
+        assert!(validate_precondition_checks(&effect, &mismatched, 1024).is_err());
+        let honest = vec![veyra_protocol::VerificationCheck {
+            condition: effect.preconditions[0].clone(),
+            passed: true,
+            message: "observed".into(),
+        }];
+        validate_precondition_checks(&effect, &honest, 1024).unwrap();
+        let oversized = vec![veyra_protocol::VerificationCheck {
+            condition: effect.preconditions[0].clone(),
+            passed: true,
+            message: "x".repeat(4_096),
+        }];
+        assert!(validate_precondition_checks(&effect, &oversized, 1024).is_err());
     }
 
     #[tokio::test]
@@ -2808,14 +3247,44 @@ mod tests {
             Err(KernelError::InvalidPlan(_))
         ));
 
-        let mut ignored_precondition = FixturePlanner.plan(&intent).await.unwrap();
-        ignored_precondition.steps[0].effects[0].preconditions = vec![Condition::FileExists {
+        // VEP-0002 `veyra.preconditions/v1`: an in-scope deterministic filesystem precondition
+        // is a valid declaration, while every non-evaluable kind is invalid rather than
+        // silently skipped.
+        let mut supported_precondition = FixturePlanner.plan(&intent).await.unwrap();
+        supported_precondition.steps[0].effects[0].preconditions = vec![Condition::FileExists {
             path: "notes/hello.txt".into(),
             expected: false,
         }];
+        kernel
+            .validate_plan(&intent, &supported_precondition)
+            .unwrap();
+
+        for condition in [
+            Condition::HttpStatus { status: 200 },
+            Condition::OutputSha256 {
+                digest: "aa".repeat(32),
+            },
+            Condition::Custom {
+                name: "veyra.example.unverifiable/v1".into(),
+                parameters: json!({}),
+            },
+        ] {
+            let mut unsupported = FixturePlanner.plan(&intent).await.unwrap();
+            unsupported.steps[0].effects[0].preconditions = vec![condition];
+            assert!(matches!(
+                kernel.validate_plan(&intent, &unsupported),
+                Err(KernelError::InvalidPlan(_))
+            ));
+        }
+
+        let mut out_of_scope_precondition = FixturePlanner.plan(&intent).await.unwrap();
+        out_of_scope_precondition.steps[0].effects[0].preconditions = vec![Condition::FileExists {
+            path: "notes/private.txt".into(),
+            expected: true,
+        }];
         assert!(matches!(
-            kernel.validate_plan(&intent, &ignored_precondition),
-            Err(KernelError::InvalidPlan(_))
+            kernel.validate_plan(&intent, &out_of_scope_precondition),
+            Err(KernelError::Adapter(AdapterError::Containment(_)))
         ));
 
         let mut out_of_scope_check = FixturePlanner.plan(&intent).await.unwrap();

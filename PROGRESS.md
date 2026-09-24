@@ -1308,3 +1308,127 @@ and per-host network filesystem behavior still depend on the OS honoring
 on this host but no reachable SMB share was available to exercise a
 success-path workspace. The exact-spelling check adds one bounded parent
 enumeration per path component, proportional to sibling count.
+
+## 2026-09-24 - versioned precondition-evaluation contract (VEP-0002)
+
+- Delivered the roadmap item for a versioned precondition contract. V0.1
+  rejected every non-empty `Effect.preconditions` list; the new
+  `veyra.preconditions/v1` contract (`docs/protocol/VEP-0002.md`,
+  `veyra_protocol::PRECONDITION_CONTRACT_VERSION`) evaluates only the
+  deterministic filesystem kinds `file_exists` and `file_sha256` — every other
+  `Condition` kind (`http_status`, `output_sha256`, `custom`), duplicate
+  conditions, unbounded text, and non-canonical digests fail closed at plan
+  validation.
+- Ordering is explicit in `Kernel::run_transaction`: the gate runs after the
+  live authority recheck (`authorize_for_execution`) and before capability
+  use, approval-nonce, idempotency, or staging consumption, so revocation
+  between approval and execution fails closed without any observation. Each
+  effect's adapter evaluates read-only via the new
+  `EffectAdapter::check_preconditions` — the trait default fails closed, so
+  HTTP, process, and third-party adapters that do not implement it keep
+  rejecting declared preconditions in `validate` exactly as before.
+- The filesystem adapter re-normalizes every condition path and requires it
+  to equal one of the effect's declared resource paths, both in `validate`
+  and again at evaluation time under the same no-follow containment used for
+  postconditions; digests are read through the bounded regular-file reader.
+  A false condition is a `passed: false` check, while an unobservable,
+  out-of-scope, or unsupported condition is an `AdapterError`.
+- Failure semantics are honest and bounded: the kernel validates evidence
+  count, declared-condition coverage, JSON shape, and byte budget, replaces
+  untrustworthy evidence with a bounded
+  `veyra.adapter.precondition_error/v1` check row, journals
+  `effect.preconditions_evaluated` per evaluated effect with the contract
+  identifier, transitions `approved → precondition_failed` once
+  (`transaction.precondition_failed`), and returns a non-committed
+  `RunOutcome` with no receipts, verifications, or recoveries.
+  `precondition_failed` is a true sink: no outgoing edges, terminal in
+  `is_terminal`/`is_final`, excluded from recovery classification, and a
+  stable wire value pinned by a committed fixture and schema assertion.
+- Coverage: kernel tests for satisfied commit with journaled evaluation,
+  false-precondition refusal with zero side-effect or authority-consumption
+  events, revocation-before-evaluation, adapter error conversion, and
+  missing/mismatched/oversized evidence rejection; state tests proving the
+  edge exists only from `approved` and is a sink; filesystem tests for
+  in-scope evaluation, false-as-evidence, evaluation-time containment, and
+  unsupported kinds; a model test pinning `precondition_failed` wire
+  serialization; plan-validation tests for kind allowlisting and scope. Evals
+  EV-076 through EV-082 cover the same contract surface (renumbered past the
+  EV-070–EV-075 Windows alias scenarios that landed first), and EV-052/EV-053
+  were retitled to match the new semantics.
+- Protocol compatibility: `veyra.protocol/v1` is unchanged — the new surface
+  is a separable contract version recorded in every evaluation event.
+  `TransactionState` gains one serialized value (`precondition_failed`, 17
+  states total); generated JSON Schemas were regenerated and verified, the
+  TypeScript SDK union and desktop state styling recognize it, and a
+  committed fixture pins the wire form. The precondition gate changes no
+  canonicalization or containment primitive, so the existing fuzz targets
+  already cover their inputs (`normalized_relative_path`, `resource_covers`,
+  canonical JSON) unchanged.
+- Docs updated: VEP-0002 records the contract, lifecycle placement,
+  atomicity, failure semantics, adapter contract, and compatibility; VEP-0001
+  lifecycle and adapter interface now reference it; the threat model adds
+  precondition oracle/bypass and point-in-time-observation rows; the
+  architecture lifecycle diagram and ordered steps include the gate;
+  adapter-authoring, API/CLI reference, README invariants, ROADMAP (item
+  marked delivered), CHANGELOG, and AGENTS invariants are synchronized.
+
+Verification on this Windows host (GNU Rust 1.96.0; MSVC `link.exe` absent as
+documented):
+
+```text
+cargo +1.96.0-x86_64-pc-windows-gnu fmt --all -- --check
+cargo +1.96.0-x86_64-pc-windows-gnu clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo +1.96.0-x86_64-pc-windows-gnu test --workspace --all-targets --all-features --locked
+cargo +1.96.0-x86_64-pc-windows-gnu test -p veyra-executor -p veyra-core --all-targets --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo +1.96.0-x86_64-pc-windows-gnu doc --workspace --all-features --no-deps --locked
+cargo +1.96.0-x86_64-pc-windows-gnu run --locked -p veyra-protocol --example generate-schema -- packages/protocol-schema/schema
+node packages/protocol-schema/scripts/verify-generated.mjs
+node --test packages/protocol-schema/tests/schema.test.mjs
+cargo deny check advisories bans licenses sources --hide-inclusion-graph
+corepack pnpm install --frozen-lockfile
+corepack pnpm oss:check
+corepack pnpm release:check
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm package:check
+corepack pnpm audit --prod --audit-level high
+corepack pnpm eval
+```
+
+Results: workspace `cargo test` passed 142 tests across 12 binaries with zero
+failures, including the 5 new kernel precondition tests, the state-graph sink
+test, the filesystem evaluation test, and the wire-name pin; a post-refactor
+rerun of the executor and core suites passed 76 tests. `clippy -D warnings`
+and `RUSTDOCFLAGS="-D warnings" cargo doc` are clean. All 16 generated
+schemas verified; the new compatibility fixture and `precondition_failed`
+enum assertion pass in `schema.test.mjs`. `oss:check` passed 520 assertions,
+`release:check` 27, `package:check` 70 publication checks plus archive gates,
+`pnpm format`/`check`/`lint`/`test`/`build` all clean, and `pnpm audit` found
+no vulnerabilities. `cargo deny` passed with the pre-existing unused `NCSA`
+allowance warning. Evals: after rebasing onto #53's alias-hardening commit,
+the merged 82-scenario catalog passed with 80 passed, 2 environment-limited
+(EV-008 and EV-069, the documented unprivileged-Windows symlink limits), 0
+failed; all seven precondition scenarios EV-076 through EV-082 passed with
+their probes observed.
+
+Failed runs recorded: two `pnpm --filter @veyra/desktop` vitest invocations
+and the desktop leg of one `pnpm test` reported "Timeout waiting for worker
+to respond" while the host was saturated by the cold `cargo` rebuild and
+unrelated resident load (a game-server process and dozens of stale node
+workers); reruns on the idle host passed 6/6 tests, matching the documented
+unprivileged-Windows vitest startup-bound limitation. One clippy run failed
+on `filesystem::validate` exceeding `too_many_lines` (103/100) and was fixed
+by extracting the shared `validate_conditions` helper rather than an
+`#[allow]`.
+
+Residual risk: precondition observation is a point-in-time gate, not a lock —
+filesystem state can change between evaluation and staging, which the later
+TOCTOU re-checks (preview digest, staged digests, no-follow opens) re-observe
+under their own controls; the gap narrows execution but cannot freeze the
+workspace, and VEP-0002 documents this explicitly rather than hiding it. A
+non-filesystem adapter that later implements `check_preconditions` must
+restate its own containment reasoning; only `file_exists`/`file_sha256`
+inside exact declared paths are contractually defined today.

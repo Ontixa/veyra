@@ -35,6 +35,8 @@ impl EffectAdapter for MyAdapter {
     fn validate(&self, effect: &Effect) -> Result<(), AdapterError> { /* shape only */ }
     async fn preflight(&self, effect: &Effect, ctx: &AdapterContext)
         -> Result<AdapterPreflight, AdapterError> { /* observe, never mutate */ }
+    async fn check_preconditions(&self, effect: &Effect, ctx: &AdapterContext)
+        -> Result<Vec<VerificationCheck>, AdapterError> { /* observe, never mutate */ }
     async fn stage(&self, effect: &Effect, ctx: &AdapterContext)
         -> Result<StagedEffect, AdapterError> { /* bind restoration data */ }
     async fn execute(&self, effect: &Effect, staged: &StagedEffect, ctx: &AdapterContext)
@@ -51,9 +53,12 @@ impl EffectAdapter for MyAdapter {
 conditions, unknown or ignored input names, understated risk, dishonest reversibility, unsafe retry
 settings, and every capability constraint the adapter cannot actually enforce, without touching
 external state. Mutating operations must not accept `RiskLevel::Low`; broad, externally visible, or
-irreversible operations need a correspondingly higher floor. V0.1 rejects all non-empty
-`preconditions` at the kernel and accepts only one attempt with zero backoff and no retryable error
-names; adapters are never automatically reinvoked by the kernel. Call
+irreversible operations need a correspondingly higher floor. Under the VEP-0002
+`veyra.preconditions/v1` contract the kernel accepts only `file_exists` and `file_sha256` as
+declared preconditions; adapters that do not implement `check_preconditions` must keep rejecting
+non-empty `preconditions` in `validate`, and the trait default already fails closed. V0.1 accepts
+only one attempt with zero backoff and no retryable error names; adapters are never automatically
+reinvoked by the kernel. Call
 `veyra_executor::validate_capability_constraints(effect, &[...])` with only the adapter-specific
 constraint names whose semantics you enforce; the helper recognizes kernel-wide caveats and rejects
 everything else.
@@ -61,6 +66,15 @@ everything else.
 `preflight` observes the current state and returns the exact display content that will enter the
 approved effect digest. Never mutate in preflight. Redact headers, payload fields, and other values
 that could contain secrets.
+
+`check_preconditions` runs once per effect after the kernel has rechecked live authority and before
+any capability use or staging. It observes only, never mutates, and returns one `VerificationCheck`
+per declared precondition in order — a false condition is `passed: false`, while an unobservable,
+out-of-scope, or unsupported condition is an `AdapterError`. Every condition path must be one of
+the effect's declared resource paths: a precondition is an observation constraint inside authority
+already granted, never a way to widen it. Adapters that cannot evaluate the VEP-0002 surface must
+reject declared preconditions in `validate` instead of answering with a guess; the kernel also
+fails closed on missing, mismatched, or oversized check evidence.
 
 `stage` must re-observe TOCTOU-sensitive state and compare it with the approved preview. Its
 `StagedEffect` must repeat adapter, effect ID, and `effect.content_digest()`. Persist enough
@@ -119,10 +133,11 @@ constraints, principal and bindings.
 ## 5. Required tests
 
 At minimum cover malformed shape, unknown operation and input field, risk understatement,
-unsupported/out-of-scope conditions, preview without mutation, TOCTOU at stage and execute,
-duplicate idempotent invocation at the system boundary, output limits, timeouts, verification
-failure, crash-safe staged-data decoding, non-clobbering rollback, partial compensation, and secret
-redaction. Adapters with durable staging artifacts also cover the retention sweep: ineligible and
+unsupported/out-of-scope conditions — including declared preconditions, which an adapter that does
+not implement `check_preconditions` must still reject — preview without mutation, TOCTOU at stage
+and execute, duplicate idempotent invocation at the system boundary, output limits, timeouts,
+verification failure, crash-safe staged-data decoding, non-clobbering rollback, partial
+compensation, and secret redaction. Adapters with durable staging artifacts also cover the retention sweep: ineligible and
 unlisted entries survive, corrupt or link-shaped entries fail closed, sweep bounds hold, and a
 repeated sweep is a no-op. Property-test resource containment when it has hierarchy.
 

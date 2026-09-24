@@ -233,9 +233,12 @@ operations, and rejected if any resource exceeds the originating intent.
   state are content-bound to that chain. Verification reports corruption as an explicit invalid
   result; this is still not a blockchain, remote attestation, or protection from an attacker able
   to rewrite the complete database and local anchor.
-- V0.1 rejects non-empty protocol `preconditions` rather than pretending to enforce them. Each
-  bundled adapter accepts only exact input names and supported postconditions; filesystem checks
-  cannot read beyond the effect's resource scope.
+- Declared protocol `preconditions` are evaluated under the versioned `veyra.preconditions/v1`
+  contract (VEP-0002): only filesystem `file_exists`/`file_sha256` observations inside the
+  effect's declared resource, checked after the live-authority recheck and before any staging or
+  side effect. Every other kind fails closed, and a false or unevaluable condition ends the
+  transaction in `precondition_failed`. Each bundled adapter accepts only exact input names and
+  supported postconditions; filesystem checks cannot read beyond the effect's resource scope.
 - “Reversible” means the adapter can restore the prior state under its documented preconditions.
   Mutating HTTP methods and process effects cannot claim reversibility; compensation is separate and
   may be partial. HTTP `GET`/`HEAD`/`OPTIONS` rely on the allowlisted service honoring their

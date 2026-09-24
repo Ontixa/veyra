@@ -4562,6 +4562,7 @@ fn recovery_record(transaction: &Transaction) -> Result<RecoveryRecord, JournalE
         | TransactionState::ManualRecovery => RecoveryAction::ManualRecovery,
         TransactionState::Committed
         | TransactionState::Denied
+        | TransactionState::PreconditionFailed
         | TransactionState::Failed
         | TransactionState::RolledBack
         | TransactionState::PartiallyCompensated
@@ -4590,6 +4591,7 @@ fn state_name(state: TransactionState) -> &'static str {
         TransactionState::Verifying => "verifying",
         TransactionState::Committed => "committed",
         TransactionState::Denied => "denied",
+        TransactionState::PreconditionFailed => "precondition_failed",
         TransactionState::Failed => "failed",
         TransactionState::Compensating => "compensating",
         TransactionState::RolledBack => "rolled_back",
