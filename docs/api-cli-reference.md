@@ -131,6 +131,8 @@ veyra capability issue FILE --issuer PRINCIPAL_ID
 veyra audit verify
 veyra audit export [--transaction TRANSACTION_ID] [--limit 1000] [--cursor OPAQUE_CURSOR]
 veyra journal migrate [--data-directory PATH] [--backup PATH]
+veyra journal anchor export [--data-directory PATH] [--out PATH]
+veyra journal anchor check [--data-directory PATH] --file PATH
 veyra demo [--directory PATH]
 ```
 
@@ -144,7 +146,20 @@ inside the data directory; the path must not already exist), applies the ordered
 one atomic transaction, and prints the `MigrationReport`. Stop the daemon first; unknown or newer
 `schema_version` values — including downgrades — fail closed without writing.
 
+`veyra journal anchor` manages authenticated checkpoints kept outside the journal database.
+`export` prints (or writes to `--out`, which must not already exist) a `veyra.audit-anchor/v1`
+JSON artifact pinning the current audit `event_count` and `head_hash`, HMAC-authenticated with
+the journal's `receipt.key`. `check` verifies a stored `--file` anchor: the artifact schema,
+signer key, and tag must verify, and the chain must still contain the pinned head at the
+anchored sequence, so a database rewritten or truncated after export fails even when its
+internal chain verifies. `check` prints the `AnchorVerification` report when it is valid and
+exits non-zero (exit 65) with the failure reason when it is not. Both commands are offline,
+require an already-initialized data directory, and never create a missing journal or key; an
+anchor only verifies against the journal that signed it, and later legitimate appends do not
+invalidate it.
+
 Exit codes follow sysexits-style meanings: `0` success, `64` invalid input/JSON/URL, `65` journal
-data refused (unsupported or corrupt schema state), `69` daemon unreachable, `70` other
-API/software failure, `74` journal I/O failure, `75` transaction conflict, `77` authentication
-failure, and `78` local configuration or filesystem failure.
+or audit-anchor data refused (unsupported or corrupt schema state, or an anchor that no longer
+matches), `69` daemon unreachable, `70` other API/software failure, `74` journal I/O failure,
+`75` transaction conflict, `77` authentication failure, and `78` local configuration or
+filesystem failure.

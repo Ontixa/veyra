@@ -231,8 +231,11 @@ operations, and rejected if any resource exceeds the originating intent.
 - Audit events are hash-chained and receipts are locally MAC-authenticated. Transaction snapshots,
   immutable protocol objects, capability facts, approval replay state, stages, and idempotency
   state are content-bound to that chain. Verification reports corruption as an explicit invalid
-  result; this is still not a blockchain, remote attestation, or protection from an attacker able
-  to rewrite the complete database and local anchor.
+  result; this is still not a blockchain or remote attestation. An attacker who can rewrite the
+  complete database and local anchor can evade internal verification, so operators can export an
+  HMAC-authenticated audit-anchor checkpoint (`veyra journal anchor export`) and later detect the
+  rewrite with `veyra journal anchor check` — provided the exported anchor is held where the
+  attacker cannot also replace it.
 - Declared protocol `preconditions` are evaluated under the versioned `veyra.preconditions/v1`
   contract (VEP-0002): only filesystem `file_exists`/`file_sha256` observations inside the
   effect's declared resource, checked after the live-authority recheck and before any staging or
@@ -257,7 +260,7 @@ coordination.
 - [`apps/desktop/`](apps/desktop/) — real React/Tauri control plane
 - [`examples/safe-workspace/`](examples/safe-workspace/) — runnable intent and policy examples
 - [`examples/custom-adapter/`](examples/custom-adapter/) — third-party reversible adapter example
-- [`evals/`](evals/) — 64 security and recovery scenarios with machine-readable results
+- [`evals/`](evals/) — 84 security and recovery scenarios with machine-readable results
 - [`docs/`](docs/) — architecture, VEP-0001, threat model, API/CLI, adapter guide, ADRs, and comparison
 
 ## Develop and verify

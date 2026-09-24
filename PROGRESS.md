@@ -1524,3 +1524,69 @@ the recorded run; no adapter defect was observed. Residual risk: the target
 holds one patch-operation fixture, so move/delete/create commit arms share
 the rename primitive but are not separately driven; per-input filesystem I/O
 keeps throughput near 60 exec/s under WSL `/mnt` (faster on CI ext4).
+
+## 2026-09-24 - authenticated external audit anchors
+
+- Implemented the operator-held authenticated audit anchor from the roadmap (the external
+  half of "an authenticated audit anchor outside SQLite or optional remote transparency
+  sink"). `Journal::export_audit_anchor` produces a small `veyra.audit-anchor/v1` JSON
+  artifact pinning `created_at`, `journal_schema_version`, `event_count`, `head_hash`, and
+  `signer_key_id`, authenticated by HMAC-SHA-256 (constant-time compared) over the canonical
+  serialization with the `authentication` field cleared, keyed by the same local
+  `receipt.key` that signs receipts — so a database-only attacker cannot forge one.
+- `Journal::verify_audit_anchor` fails closed on every mismatch class: unknown artifact
+  schema, foreign `signer_key_id`, malformed hex/timestamp fields, a bad tag, a missing
+  event at the anchored sequence, or a different recomputed event hash — all reported as an
+  `AnchorVerification` with `valid: false` plus a safe message; storage errors still
+  propagate as `JournalError`. Later legitimate appends do not invalidate an older anchor
+  (the pinned event only has to remain present), and an empty chain anchors on the genesis
+  hash.
+- New offline CLI surface: `veyra journal anchor export [--out PATH]` (refuses to overwrite
+  an existing file) and `veyra journal anchor check --file PATH` (prints the verification
+  report on success, exits 65 with the failure reason when invalid). Both open an
+  already-initialized `--data-directory` and never create a missing journal or key.
+- Adversarial coverage: five `veyra-journal` anchor tests (genesis pin, JSON round-trip and
+  `deny_unknown_fields`, later-append validity, whole-database rewrite/truncation
+  detection, forged/foreign/malformed/mis-pinned rejection including an anchor honestly
+  signed by a different journal key) and three `veyra-cli` integration tests (export/check
+  round trip, tampered-or-foreign rejection, and fail-closed without initialized state).
+- Evals: added EV-083 (operator-held anchor detects a whole-database rewrite and
+  truncation) and EV-084 (forged, foreign-key, malformed, or mis-pinned anchors fail
+  closed) to `evals/scenarios/security-and-recovery.json`, bringing the catalog to 84
+  scenarios; `evals/results/latest.json` was regenerated on this host.
+- Docs synchronized: ADR-0005 (`docs/architecture/adr/0005-external-audit-anchor-checkpoints.md`),
+  the threat model's journal-tamper row and operational guidance, the architecture
+  persistence section, the API/CLI reference (commands plus the exit-65 description),
+  README security bullet and scenario count, CHANGELOG, and ROADMAP (item marked delivered;
+  the remote transparency sink remains open).
+
+Verification on this Windows host (the `rust-toolchain.toml` channel resolves to
+`1.96.0-x86_64-pc-windows-msvc` here and `link.exe` is absent, so the GNU toolchain was used
+per `AGENTS.md`):
+
+```text
+cargo +1.96.0-x86_64-pc-windows-gnu fmt --all -- --check
+cargo +1.96.0-x86_64-pc-windows-gnu clippy -p veyra-journal -p veyra-cli --all-targets --locked -- -D warnings
+cargo +1.96.0-x86_64-pc-windows-gnu test -p veyra-journal -p veyra-cli --locked
+corepack pnpm install --frozen-lockfile
+corepack pnpm format
+corepack pnpm oss:check
+corepack pnpm eval
+```
+
+Results: fmt clean; clippy clean with `-D warnings`; 46 `veyra-journal` and 9 `veyra-cli`
+tests pass; prettier reports all matched files clean; `oss:check` passes 520 assertions;
+`pnpm eval` reports 82 passed, 2 environment-limited (the pre-existing Windows symlink
+scenarios EV-008/EV-069), and 0 failed across all four gates (rust 0, typescript 0,
+desktop 0, demo 0). One earlier eval run on a busy machine recorded three failures in
+unrelated TypeScript/desktop scenarios caused by a vitest forks-worker startup timeout;
+the desktop suite passed standalone (6/6 tests) and the immediate eval re-run was fully
+green, confirming a transient environment flake rather than a regression.
+
+Residual risk and limitations, stated honestly: an exported anchor is locally
+authenticated evidence, not remote attestation or a transparency log — detection of a
+whole-database rewrite requires the operator to keep anchor copies where the attacker
+cannot also replace them, and a `receipt.key` holder can mint fresh anchors (anchors
+prove only that the pinned head existed at export). The optional remote transparency
+sink for third-party verifiability remains on the roadmap. MSVC toolchain coverage and
+the full CI matrix remain to be exercised on the pull request.
