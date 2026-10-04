@@ -81,6 +81,10 @@ Changelog conventions.
 
 ### Fixed
 
+- Kept an explicitly selected desktop connection authoritative while automatic connection
+  restoration is still pending. Late saved-connection health responses can no longer switch the
+  control plane back to another daemon or replace the selected connection's error; failed
+  explicit connections remain available to retry.
 - Made release recovery rebuild an existing immutable annotated tag from protected `main`, and
   replaced the default-branch-only Dependency Graph SBOM export with a full-SHA-pinned Syft scan of
   the exact release checkout.

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -381,4 +382,143 @@ describe("Veyra desktop control plane", () => {
       "local daemon unavailable",
     );
   });
+
+  it.each(["before", "after"])(
+    "keeps the explicit connection when saved health resolves %s it",
+    async (order) => {
+      const { savedHealth, explicitHealth, fetch } = setupConnectionRace();
+      render(<App />);
+      await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      submitExplicitConnection();
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+
+      if (order === "before") {
+        await act(async () =>
+          savedHealth.resolve(Response.json({ status: "ok" })),
+        );
+        expect(
+          screen.getByRole("button", { name: "Connecting…" }),
+        ).toBeTruthy();
+        expect(screen.queryByText("3 events verified")).toBeNull();
+      }
+
+      await act(async () =>
+        explicitHealth.resolve(Response.json({ status: "ok" })),
+      );
+      expect(await screen.findByText("7 events verified")).toBeTruthy();
+
+      if (order === "after") {
+        await act(async () =>
+          savedHealth.resolve(Response.json({ status: "ok" })),
+        );
+      }
+
+      expect(screen.getByText("7 events verified")).toBeTruthy();
+      expect(localStorage.getItem("veyra.apiUrl")).toBe(
+        "http://127.0.0.1:7844/v1/",
+      );
+      expect(
+        fetch.mock.calls.some(([input]) => {
+          const url = requestUrl(input);
+          return url.port === "7843" && !url.pathname.endsWith("/health");
+        }),
+      ).toBe(false);
+    },
+  );
+
+  it.each(["success", "failure"])(
+    "keeps a failed explicit connection retryable after a late saved %s",
+    async (savedResult) => {
+      const { savedHealth, explicitHealth, fetch } = setupConnectionRace();
+      render(<App />);
+      await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      submitExplicitConnection();
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await act(async () =>
+        explicitHealth.reject(new Error("selected daemon unavailable")),
+      );
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "selected daemon unavailable",
+      );
+
+      await act(async () => {
+        if (savedResult === "success")
+          savedHealth.resolve(Response.json({ status: "ok" }));
+        else savedHealth.reject(new Error("saved daemon unavailable"));
+      });
+      expect(screen.getByRole("alert").textContent).toContain(
+        "selected daemon unavailable",
+      );
+      expect(
+        screen.getByRole("button", { name: "Connect locally" }),
+      ).toBeTruthy();
+      expect(localStorage.getItem("veyra.apiUrl")).toBe(
+        "http://127.0.0.1:7843/v1/",
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Connect locally" }));
+      expect(await screen.findByText("7 events verified")).toBeTruthy();
+      expect(localStorage.getItem("veyra.apiUrl")).toBe(
+        "http://127.0.0.1:7844/v1/",
+      );
+    },
+  );
 });
+
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<Response>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function requestUrl(input: Parameters<typeof globalThis.fetch>[0]) {
+  return new URL(input instanceof Request ? input.url : input.toString());
+}
+
+function setupConnectionRace() {
+  localStorage.setItem("veyra.apiUrl", "http://127.0.0.1:7843/v1/");
+  localStorage.setItem("veyra.token", TOKEN);
+  const savedHealth = deferredResponse();
+  const explicitHealth = deferredResponse();
+  let explicitAttempts = 0;
+  const fetch = vi
+    .spyOn(globalThis, "fetch")
+    .mockImplementation(async (input) => {
+      const url = requestUrl(input);
+      if (url.pathname.endsWith("/health")) {
+        if (url.port === "7843") return savedHealth.promise;
+        if (explicitAttempts++ === 0) return explicitHealth.promise;
+        return Response.json({ status: "ok" });
+      }
+      if (url.pathname.endsWith("/audit/verify")) {
+        return Response.json({
+          valid: true,
+          events_checked: url.port === "7843" ? 3 : 7,
+          first_invalid_sequence: null,
+          message: "journal is valid",
+        });
+      }
+      if (
+        url.pathname.endsWith("/transactions/page") ||
+        url.pathname.endsWith("/audit/events/page")
+      ) {
+        return Response.json({ items: [], next_cursor: null });
+      }
+      throw new Error(`unexpected request: ${url.pathname}`);
+    });
+  return { savedHealth, explicitHealth, fetch };
+}
+
+function submitExplicitConnection() {
+  fireEvent.change(screen.getByLabelText("API URL"), {
+    target: { value: "http://127.0.0.1:7844/v1/" },
+  });
+  fireEvent.change(screen.getByLabelText("Administrative bearer token"), {
+    target: { value: TOKEN },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Connect locally" }));
+}
