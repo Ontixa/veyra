@@ -24,18 +24,27 @@ type Theme = "light" | "dark";
 export function App() {
   const [client, setClient] = useState<VeyraClient | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
+  const connectionAttemptRef = useRef(0);
 
   useEffect(() => {
     let active = true;
+    const attempt = connectionAttemptRef.current;
     void discoverConnection()
       .then(async (connection) => {
-        if (connection === null) return;
+        if (
+          connection === null ||
+          !active ||
+          attempt !== connectionAttemptRef.current
+        )
+          return;
         const candidate = createClient(connection);
         await candidate.health();
-        if (active) setClient(candidate);
+        if (active && attempt === connectionAttemptRef.current)
+          setClient(candidate);
       })
       .catch((error: unknown) => {
-        if (active) setBootError(messageOf(error));
+        if (active && attempt === connectionAttemptRef.current)
+          setBootError(messageOf(error));
       });
     return () => {
       active = false;
@@ -47,8 +56,12 @@ export function App() {
       <ConnectionScreen
         initialError={bootError}
         onConnect={async (connection) => {
+          // An explicit choice supersedes automatic restoration, even if it fails.
+          const attempt = ++connectionAttemptRef.current;
+          setBootError(null);
           const candidate = createClient(connection);
           await candidate.health();
+          if (attempt !== connectionAttemptRef.current) return;
           saveBrowserConnection(connection);
           setClient(candidate);
           setBootError(null);

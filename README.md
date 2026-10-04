@@ -196,6 +196,9 @@ corepack pnpm desktop:dev
 The Tauri host starts the same Rust kernel on an ephemeral loopback port. The UI seeds transactions
 through the real API and exposes the plan, exact scope, diff, approval challenge, causal timeline,
 receipt, verification, recovery state, and rollback controls. There is no disconnected mock backend.
+In browser development, submitting the connection form supersedes any automatic saved-connection
+attempt still in progress. A failed explicit connection stays on the form for correction or retry;
+only a successful explicit connection replaces the saved endpoint and token.
 
 ## OpenAI-compatible planning
 

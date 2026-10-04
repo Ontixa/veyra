@@ -1590,3 +1590,52 @@ cannot also replace them, and a `receipt.key` holder can mint fresh anchors (anc
 prove only that the pinned head existed at export). The optional remote transparency
 sink for third-party verifiability remains on the roadmap. MSVC toolchain coverage and
 the full CI matrix remain to be exercised on the pull request.
+
+## 2026-10-04 - preserve explicit desktop connection choice
+
+- Reproduced a startup race: a saved endpoint's delayed health response could replace a newer
+  explicitly selected client, enter the old control plane while the explicit connection was still
+  pending, or overwrite the explicit connection's failure message. Four deterministic regression
+  cases failed against the unchanged implementation.
+- Added a connection-attempt generation guard to automatic discovery, health completion, and
+  failure handling. Submitting an explicit connection invalidates automatic restoration before
+  validation starts; a failed explicit attempt remains on the form for correction or retry, and
+  only a successful explicit attempt updates the saved connection.
+- The four regressions now pass alongside the existing six desktop tests. They cover both health
+  response orderings, late saved success/failure after explicit failure, retry, persisted endpoint,
+  and absence of control-plane requests to the stale endpoint.
+- This is a desktop connection-state correction. It changes no protocol, kernel authorization,
+  credential validation, journal format, dependency, or public API. Existing loopback and bearer
+  checks still apply to every attempted connection. It does not add cancellation of an already
+  started read-only health request. README and changelog document the observable behavior.
+
+Local verification on Linux with Rust 1.96.0, Node 24.19.0, and pinned pnpm 11.20.0:
+
+```text
+cargo fmt --all -- --check
+cargo build --locked -p veyra-server -p veyra-cli
+corepack pnpm install --frozen-lockfile
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm format
+corepack pnpm oss:check
+corepack pnpm release:check
+corepack pnpm package:check
+corepack pnpm audit --prod --audit-level high
+git diff --check
+```
+
+These checks passed: 57 JavaScript/schema/release tests, with six existing PowerShell-host tests
+skipped because PowerShell is absent; 520 OSS assertions; 27 release assertions; seven Rust and two
+npm archive checks; 70 publication-plan checks; no known production npm vulnerabilities. A separate
+code review found no blocking issue in the implementation and regression tests.
+
+Local limitations: full workspace clippy was attempted and stopped at the missing `glib-2.0`
+development package; this host also lacks GTK/WebKit development packages, so full workspace Rust
+tests/docs, evals, and Windows MSVC coverage remain for hosted CI. The real daemon and Vite started,
+but the existing Playwright real-API test could not launch system Chromium because the host denies
+its Unix socket creation, including after an approved execution escalation. No browser assertion
+ran. The full hosted Linux gate must exercise that real-API flow before merge; the passing local
+checks are not a complete gate pass.
