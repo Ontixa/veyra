@@ -20,6 +20,10 @@ import {
 
 type View = "transactions" | "audit";
 type Theme = "light" | "dark";
+type BundleLoadState =
+  | { status: "idle" | "ready" }
+  | { status: "loading"; error: string | null }
+  | { status: "error"; error: string };
 
 export function App() {
   const [client, setClient] = useState<VeyraClient | null>(null);
@@ -79,6 +83,9 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [bundle, setBundle] = useState<TransactionBundle | null>(null);
+  const [bundleLoad, setBundleLoad] = useState<BundleLoadState>({
+    status: "idle",
+  });
   const [view, setView] = useState<View>("transactions");
   const [query, setQuery] = useState("");
   const [intentContent, setIntentContent] = useState("Hello from Veyra.\n");
@@ -93,6 +100,11 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   );
   const selectedIdRef = useRef(selectedId);
   const bundleRequestRef = useRef(0);
+  const bundleInFlightRef = useRef<{
+    id: string;
+    request: number;
+    promise: Promise<void>;
+  } | null>(null);
   selectedIdRef.current = selectedId;
 
   const refreshTransactions = useCallback(async () => {
@@ -103,24 +115,35 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   }, [client]);
 
   const loadBundle = useCallback(
-    async (id: string) => {
+    (id: string) => {
+      const pending = bundleInFlightRef.current;
+      if (pending?.id === id) return pending.promise;
       const request = ++bundleRequestRef.current;
-      try {
-        const next = await client.getTransactionBundle(id);
-        if (
-          request === bundleRequestRef.current &&
-          selectedIdRef.current === id
-        ) {
-          setBundle(next);
+      setBundle(null);
+      setBundleLoad((current) => ({
+        status: "loading",
+        error: "error" in current ? current.error : null,
+      }));
+      const isCurrent = () =>
+        request === bundleRequestRef.current && selectedIdRef.current === id;
+      const promise = (async () => {
+        try {
+          const next = await client.getTransactionBundle(id);
+          if (isCurrent()) {
+            setBundle(next);
+            setBundleLoad({ status: "ready" });
+          }
+        } catch (caught: unknown) {
+          if (isCurrent()) {
+            setBundleLoad({ status: "error", error: messageOf(caught) });
+          }
+        } finally {
+          if (bundleInFlightRef.current?.request === request)
+            bundleInFlightRef.current = null;
         }
-      } catch (caught: unknown) {
-        if (
-          request === bundleRequestRef.current &&
-          selectedIdRef.current === id
-        ) {
-          throw caught;
-        }
-      }
+      })();
+      bundleInFlightRef.current = { id, request, promise };
+      return promise;
     },
     [client],
   );
@@ -213,15 +236,17 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   }, [refreshAudit, refreshTransactions]);
 
   useEffect(() => {
-    if (selectedId === null) {
-      bundleRequestRef.current += 1;
-      setBundle(null);
-      return;
-    }
     setBundle(null);
-    void loadBundle(selectedId).catch((caught: unknown) =>
-      setError(messageOf(caught)),
-    );
+    setBundleLoad({ status: "idle" });
+    if (selectedId === null) {
+      bundleInFlightRef.current = null;
+    } else {
+      void loadBundle(selectedId);
+    }
+    return () => {
+      bundleRequestRef.current += 1;
+      bundleInFlightRef.current = null;
+    };
   }, [loadBundle, selectedId]);
 
   const perform = useCallback(
@@ -414,6 +439,29 @@ function ControlPlane({ client }: { client: VeyraClient }) {
             <AuditView events={filteredEvents} verification={audit} />
           ) : selectedId === null ? (
             <EmptyState onCreate={() => void seedIntent()} />
+          ) : "error" in bundleLoad && bundleLoad.error !== null ? (
+            <section
+              className="empty-state"
+              aria-label="Transaction read recovery"
+            >
+              <p className="eyebrow">Transaction / {shortId(selectedId)}</p>
+              <h1>Could not load transaction</h1>
+              <p role="alert">{bundleLoad.error}</p>
+              <p>
+                Retry reads this transaction's details only. It does not repeat
+                approval, execution, or rollback.
+              </p>
+              <button
+                className="primary-button"
+                disabled={bundleLoad.status === "loading" || busy !== null}
+                onClick={() => void loadBundle(selectedId)}
+              >
+                Retry transaction
+              </button>
+              {bundleLoad.status === "loading" && (
+                <LoadingBar label="Retrying transaction" />
+              )}
+            </section>
           ) : bundle === null ? (
             <InspectorSkeleton />
           ) : (

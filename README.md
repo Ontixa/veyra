@@ -199,6 +199,10 @@ receipt, verification, recovery state, and rollback controls. There is no discon
 In browser development, submitting the connection form supersedes any automatic saved-connection
 attempt still in progress. A failed explicit connection stays on the form for correction or retry;
 only a successful explicit connection replaces the saved endpoint and token.
+If a selected transaction's details cannot be read, the inspector shows an explicit error with
+**Retry transaction**. Retry makes one read-only bundle request and stays disabled while that read
+is pending. It never repeats approval, execution, or rollback. Switching between Audit and
+Transactions preserves the recovery control; selecting another transaction ignores older responses.
 
 ## OpenAI-compatible planning
 
