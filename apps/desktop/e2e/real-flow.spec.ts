@@ -70,7 +70,8 @@ test("real local transaction is operable at desktop and narrow viewports", async
   let bundleReads = 0;
   let recoveryMutations = 0;
   const countMutations = (request: import("@playwright/test").Request) => {
-    if (request.method() !== "GET") recoveryMutations += 1;
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method()))
+      recoveryMutations += 1;
   };
   page.on("request", countMutations);
   await page.route("**/transactions/*/bundle", async (route) => {

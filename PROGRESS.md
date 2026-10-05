@@ -1652,10 +1652,15 @@ checks are not a complete gate pass.
 - Generation and selection checks discard older success and failure responses, including when the
   operator returns to the same transaction. Effect cleanup invalidates pending detail reads when
   the selection or client changes or the control plane unmounts.
-- Eight new component cases cover keyboard failure/retry/success, repeated failures, same-tick
+- Ten new component cases cover keyboard failure/retry/success, repeated failures, same-tick
   duplicate clicks, stale retry success and error, A/B/A selection, global-error dismissal and
-  Audit navigation, and a failed detail refresh after rollback without replaying its POST. The
-  existing ten component tests, including startup connection ordering, still pass.
+  Audit navigation, a failed detail refresh after rollback without replaying its POST, a late
+  post-create refresh after selection changes, and the production StrictMode lifecycle. The
+  existing ten component tests, including startup connection ordering, still pass. Nine new cases
+  fail against the unchanged main App implementation; existing A/B/A stale-response protection passes.
+- Independent review identified a stale post-create caller that could clear a newer inspector before
+  the response guard ran. A deterministic test failed before adding an entry guard: non-selected
+  detail loads now return before changing state, starting a request, or sharing a pending read.
 - Extended the existing real-daemon Playwright flow to interrupt exactly one committed transaction
   bundle GET, capture recovery at desktop/narrow widths, recover by keyboard, assert no mutation
   request during recovery, and continue the original rollback flow. The Linux CI job retains only
@@ -1679,7 +1684,7 @@ corepack pnpm audit --prod --audit-level high
 git diff --check
 ```
 
-These checks passed: 65 tests (18 desktop, 8 SDK, 3 schema, and 36 release-control), with six existing
+These checks passed: 67 tests (20 desktop, 8 SDK, 3 schema, and 36 release-control), with six existing
 PowerShell-only tests skipped; 27 release assertions; no known production npm vulnerabilities.
 Tool caches were redirected to a writable directory without changing repository pins or lockfiles.
 

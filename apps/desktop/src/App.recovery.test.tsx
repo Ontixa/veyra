@@ -8,6 +8,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import userEvent from "@testing-library/user-event";
 import type { Transaction, TransactionBundle } from "@veyra/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -78,6 +79,7 @@ function mockApi(
   options: {
     ids?: string[];
     auditError?: boolean;
+    transactions?: () => Response | Promise<Response>;
     mutation?: (path: string) => Response;
   } = {},
 ) {
@@ -98,10 +100,13 @@ function mockApi(
           protocol_version: "veyra.protocol/v1",
         });
       if (path.endsWith("/transactions/page"))
-        return Response.json({
-          items: (options.ids ?? ["tx-a"]).map((id) => transaction(id)),
-          next_cursor: null,
-        });
+        return (
+          options.transactions?.() ??
+          Response.json({
+            items: (options.ids ?? ["tx-a"]).map((id) => transaction(id)),
+            next_cursor: null,
+          })
+        );
       if (path.endsWith("/audit/events/page"))
         return Response.json({ items: [], next_cursor: null });
       if (path.endsWith("/audit/verify"))
@@ -336,5 +341,72 @@ describe("selected transaction read recovery", () => {
       fetch.mock.calls.filter(([, init]) => init?.method === "POST"),
     ).toHaveLength(1);
     expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores a stale post-create detail load after the operator changes selection", async () => {
+    const refresh = deferred();
+    let lists = 0;
+    const read = vi.fn((id: string) => Response.json(bundle(id)));
+    const mutation = vi.fn((path: string) => {
+      expect(path).toBe("/v1/demo/seed");
+      return Response.json({
+        submission: { transaction: transaction("tx-new") },
+        human: { id: "human" },
+      });
+    });
+    const fetch = mockApi(read, {
+      mutation,
+      transactions: () =>
+        ++lists === 1
+          ? Response.json({
+              items: [transaction("tx-a"), transaction("tx-b")],
+              next_cursor: null,
+            })
+          : refresh.promise,
+    });
+    render(<App />);
+    await screen.findByRole("heading", { name: "Inspect tx-a" });
+    fireEvent.click(screen.getByRole("button", { name: "Create transaction" }));
+    await screen.findByRole("heading", { name: "Inspect tx-new" });
+    fireEvent.click(screen.getByRole("button", { name: /tx-b/i }));
+    await screen.findByRole("heading", { name: "Inspect tx-b" });
+    await act(async () => {
+      refresh.resolve(
+        Response.json({
+          items: [
+            transaction("tx-new"),
+            transaction("tx-a"),
+            transaction("tx-b"),
+          ],
+          next_cursor: null,
+        }),
+      );
+    });
+    expect(screen.getByRole("heading", { name: "Inspect tx-b" })).toBeTruthy();
+    expect(screen.queryByLabelText("Loading transaction")).toBeNull();
+    expect(read.mock.calls.filter(([id]) => id === "tx-new")).toHaveLength(1);
+    expect(mutation).toHaveBeenCalledTimes(1);
+    expect(
+      fetch.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(1);
+  });
+
+  it("recovers under the production StrictMode lifecycle without duplicate retry reads", async () => {
+    const read = vi
+      .fn()
+      .mockReturnValueOnce(failure())
+      .mockReturnValueOnce(Response.json(bundle("tx-a")));
+    const fetch = mockApi(read);
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    fireEvent.click(await expectRecovery());
+    expect(
+      await screen.findByRole("heading", { name: "Inspect tx-a" }),
+    ).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(2);
+    expectReadsOnly(fetch);
   });
 });

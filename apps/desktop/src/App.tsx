@@ -116,6 +116,8 @@ function ControlPlane({ client }: { client: VeyraClient }) {
 
   const loadBundle = useCallback(
     (id: string) => {
+      // An action's delayed refresh must not disturb a newer selection.
+      if (selectedIdRef.current !== id) return Promise.resolve();
       const pending = bundleInFlightRef.current;
       if (pending?.id === id) return pending.promise;
       const request = ++bundleRequestRef.current;
