@@ -142,6 +142,15 @@ jobs:
           curl --silent --fail -H "Authorization: Bearer $(<"$demo_root/data/api-token")" http://127.0.0.1:7843/v1/health >/dev/null
           VEYRA_E2E_TOKEN_FILE="$demo_root/data/api-token" pnpm --filter @veyra/desktop test:e2e
 
+      - name: Retain synthetic desktop screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-screenshots
+          path: test-results/desktop/**/*.png
+          if-no-files-found: ignore
+          retention-days: 7
+
   rust-windows:
     name: Rust gate (Windows MSVC)
     runs-on: windows-latest

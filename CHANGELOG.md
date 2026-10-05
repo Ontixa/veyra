@@ -81,6 +81,10 @@ Changelog conventions.
 
 ### Fixed
 
+- Replaced indefinite desktop transaction loading after a failed bundle read with an explicit
+  error and read-only **Retry transaction** control. Repeated failures remain retryable, pending
+  retries coalesce, and stale results cannot replace a newer selection. Retry never repeats
+  transaction approval, execution, or rollback.
 - Kept an explicitly selected desktop connection authoritative while automatic connection
   restoration is still pending. Late saved-connection health responses can no longer switch the
   control plane back to another daemon or replace the selected connection's error; failed
