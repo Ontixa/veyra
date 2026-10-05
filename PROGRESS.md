@@ -1590,3 +1590,109 @@ cannot also replace them, and a `receipt.key` holder can mint fresh anchors (anc
 prove only that the pinned head existed at export). The optional remote transparency
 sink for third-party verifiability remains on the roadmap. MSVC toolchain coverage and
 the full CI matrix remain to be exercised on the pull request.
+
+## 2026-10-04 - preserve explicit desktop connection choice
+
+- Reproduced a startup race: a saved endpoint's delayed health response could replace a newer
+  explicitly selected client, enter the old control plane while the explicit connection was still
+  pending, or overwrite the explicit connection's failure message. Four deterministic regression
+  cases failed against the unchanged implementation.
+- Added a connection-attempt generation guard to automatic discovery, health completion, and
+  failure handling. Submitting an explicit connection invalidates automatic restoration before
+  validation starts; a failed explicit attempt remains on the form for correction or retry, and
+  only a successful explicit attempt updates the saved connection.
+- The four regressions now pass alongside the existing six desktop tests. They cover both health
+  response orderings, late saved success/failure after explicit failure, retry, persisted endpoint,
+  and absence of control-plane requests to the stale endpoint.
+- This is a desktop connection-state correction. It changes no protocol, kernel authorization,
+  credential validation, journal format, dependency, or public API. Existing loopback and bearer
+  checks still apply to every attempted connection. It does not add cancellation of an already
+  started read-only health request. README and changelog document the observable behavior.
+
+Local verification on Linux with Rust 1.96.0, Node 24.19.0, and pinned pnpm 11.20.0:
+
+```text
+cargo fmt --all -- --check
+cargo build --locked -p veyra-server -p veyra-cli
+corepack pnpm install --frozen-lockfile
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm format
+corepack pnpm oss:check
+corepack pnpm release:check
+corepack pnpm package:check
+corepack pnpm audit --prod --audit-level high
+git diff --check
+```
+
+These checks passed: 57 JavaScript/schema/release tests, with six existing PowerShell-host tests
+skipped because PowerShell is absent; 520 OSS assertions; 27 release assertions; seven Rust and two
+npm archive checks; 70 publication-plan checks; no known production npm vulnerabilities. A separate
+code review found no blocking issue in the implementation and regression tests.
+
+Local limitations: full workspace clippy was attempted and stopped at the missing `glib-2.0`
+development package; this host also lacks GTK/WebKit development packages, so full workspace Rust
+tests/docs, evals, and Windows MSVC coverage remain for hosted CI. The real daemon and Vite started,
+but the existing Playwright real-API test could not launch system Chromium because the host denies
+its Unix socket creation, including after an approved execution escalation. No browser assertion
+ran. The full hosted Linux gate must exercise that real-API flow before merge; the passing local
+checks are not a complete gate pass.
+
+## 2026-10-05 - recover selected transaction detail reads
+
+- Reproduced a transient bundle-read failure leaving the desktop inspector in its loading skeleton
+  indefinitely. Dismissing the global error, selecting the same row, and switching Audit/Transactions
+  did not issue another read.
+- Added explicit idle/loading/error/ready detail-read state and a keyboard-operable **Retry
+  transaction** control. The recovery message persists across view changes and is independent of
+  dismissible operation errors. Retries retain their error context while loading, disable the
+  button, and share one in-flight promise for the selected transaction.
+- Generation and selection checks discard older success and failure responses, including when the
+  operator returns to the same transaction. Effect cleanup invalidates pending detail reads when
+  the selection or client changes or the control plane unmounts.
+- Ten new component cases cover keyboard failure/retry/success, repeated failures, same-tick
+  duplicate clicks, stale retry success and error, A/B/A selection, global-error dismissal and
+  Audit navigation, a failed detail refresh after rollback without replaying its POST, a late
+  post-create refresh after selection changes, and the production StrictMode lifecycle. The
+  existing ten component tests, including startup connection ordering, still pass. Nine new cases
+  fail against the unchanged main App implementation; existing A/B/A stale-response protection passes.
+- Independent review identified a stale post-create caller that could clear a newer inspector before
+  the response guard ran. A deterministic test failed before adding an entry guard: non-selected
+  detail loads now return before changing state, starting a request, or sharing a pending read.
+- Extended the existing real-daemon Playwright flow to interrupt exactly one committed transaction
+  bundle GET, capture recovery at desktop/narrow widths, recover by keyboard, assert no mutation
+  request during recovery, and continue the original rollback flow. The Linux CI job retains only
+  synthetic PNG screenshots for seven days using the existing full-SHA-pinned GitHub upload action;
+  no traces, bearer files, daemon data, or additional workflow permissions are included.
+- Compatibility: no protocol, SDK API, dependency, kernel authorization, journal, approval, or
+  mutation semantics changed. This is read recovery only, not transaction-operation replay or
+  manual kernel recovery. Existing SDK request time and response-size bounds still apply.
+
+Local verification on Linux with Node 24.19.0, pnpm 11.20.0, React 19.3.0, and jsdom 30.0.1:
+
+```text
+corepack pnpm install --frozen-lockfile
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm release:check
+corepack pnpm audit --prod --audit-level high
+git diff --check
+```
+
+These checks passed: 67 tests (20 desktop, 8 SDK, 3 schema, and 36 release-control), with six existing
+PowerShell-only tests skipped; 27 release assertions; no known production npm vulnerabilities.
+Tool caches were redirected to a writable directory without changing repository pins or lockfiles.
+
+Local limitations: `oss:check` and `package:check` were attempted but require `cargo`, which is absent
+in this executor. Rust, eval, native Tauri, real-daemon, browser, responsive visual, and Windows gates
+were not run locally. The extended hosted Linux E2E and screenshots must be checked before merge;
+component tests are synthetic DOM evidence, not a substitute for that gate. `oss:host-check` was
+attempted but the local GitHub CLI is unauthenticated. Authenticated connector reads verified active
+main rules with no bypass actor and all six required check contexts; the connector does not expose
+Actions permission-policy endpoints, so a full host-policy pass is not claimed. Existing required
+checks and security/dependency gates are unchanged.

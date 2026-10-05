@@ -66,6 +66,72 @@ test("real local transaction is operable at desktop and narrow viewports", async
     fullPage: true,
   });
 
+  // Interrupt only the bundle read; the transaction remains committed in the daemon.
+  let bundleReads = 0;
+  let recoveryMutations = 0;
+  const countMutations = (request: import("@playwright/test").Request) => {
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method()))
+      recoveryMutations += 1;
+  };
+  page.on("request", countMutations);
+  await page.route("**/transactions/*/bundle", async (route) => {
+    bundleReads += 1;
+    if (bundleReads === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: {
+            code: "unavailable",
+            message: "Temporary transaction read failure",
+          },
+        }),
+      });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Could not load transaction" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Loading transaction")).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("read-error-desktop.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 760, height: 900 });
+  await expect(
+    page.getByRole("button", { name: "Retry transaction" }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("read-error-narrow.png"),
+    fullPage: true,
+  });
+
+  await page.getByRole("button", { name: /^Audit / }).click();
+  await page.getByRole("button", { name: /^Transactions / }).click();
+  const retry = page.getByRole("button", { name: "Retry transaction" });
+  await expect(retry).toBeVisible();
+  expect(bundleReads).toBe(1);
+  await retry.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Roll back" })).toBeVisible();
+  await expect(page.getByText("Postconditions satisfied")).toBeVisible();
+  await expect(retry).toHaveCount(0);
+  expect(bundleReads).toBe(2);
+  expect(recoveryMutations).toBe(0);
+  await page.screenshot({
+    path: testInfo.outputPath("read-recovered-narrow.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.screenshot({
+    path: testInfo.outputPath("read-recovered-desktop.png"),
+    fullPage: true,
+  });
+  page.off("request", countMutations);
+
   await page.getByRole("button", { name: "Roll back" }).click();
   await expect(
     page.getByText("Rolled back", { exact: true }).first(),
