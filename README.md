@@ -207,6 +207,17 @@ After a successful preview, approval, execution, or rollback, the selected trans
 bundle read even if an earlier read is still pending. Returning to that transaction while its action
 is pending cannot let an older snapshot hide the completed state or its available controls. A late
 older response cannot replace the fresh result or its read error; recovery still retries only the GET.
+The fresh detail read starts independently of transaction-list and audit refreshes. A failed or slow
+secondary read cannot leave the old mutation control enabled or hold up the next action once current
+details are available. **View refresh incomplete** identifies the completed request and offers
+**Retry views**, which reads the list and audit only. Transaction-detail recovery remains separate;
+both recovery controls coalesce repeated clicks and use the SDK's bounded request deadline. List
+and audit pagination waits until these collections are current again.
+A successful request does not imply a committed transaction: the current bundle remains the source
+of its state and recovery classification. If an action returns an error or its response is lost,
+Veyra reports an unconfirmed outcome and requires a current detail read before showing further
+actions; **Retry transaction** performs that read. Even an API error can follow a durable state
+transition. No recovery control replays a POST.
 
 ## OpenAI-compatible planning
 
