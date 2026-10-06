@@ -412,6 +412,7 @@ test("confirmed execution and rollback survive secondary read failures without r
       .click();
     await expect(state).toHaveText(isRun ? "Committed" : "Rolled back");
     await expect(page.getByText("View refresh incomplete")).toBeVisible();
+    if (isRun) await expect(page.getByText("Journal unverified")).toBeVisible();
     expect(bundleReads).toBe(readsBefore + 1);
     await expect(page.getByText("Action stopped safely")).toHaveCount(0);
     await expect(
@@ -450,6 +451,7 @@ test("confirmed execution and rollback survive secondary read failures without r
     await expect(
       page.getByRole("region", { name: "View refresh recovery" }),
     ).toHaveCount(0);
+    await expect(page.locator(".integrity")).toContainText("events verified");
     expect(secondaryReads).toBe(2);
     expect(bundleReads).toBe(readsBefore + 1);
     expect(mutations).toBe(isRun ? 1 : 2);

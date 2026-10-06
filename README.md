@@ -212,7 +212,8 @@ secondary read cannot leave the old mutation control enabled or hold up the next
 details are available. **View refresh incomplete** identifies the completed request and offers
 **Retry views**, which reads the list and audit only. Transaction-detail recovery remains separate;
 both recovery controls coalesce repeated clicks and use the SDK's bounded request deadline. List
-and audit pagination waits until these collections are current again.
+and audit pagination waits until these collections are current again. The journal badge says
+**Journal unverified** while current audit evidence is unavailable, including after a failed read.
 A successful request does not imply a committed transaction: the current bundle remains the source
 of its state and recovery classification. If an action returns an error or its response is lost,
 Veyra reports an unconfirmed outcome and requires a current detail read before showing further

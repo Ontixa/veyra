@@ -85,7 +85,8 @@ Changelog conventions.
   delayed list/audit reads. Partial refresh notices identify the completed request and offer GET-only
   view recovery; stale mutation controls stay hidden until current details are available. Action
   errors are reported as unconfirmed outcomes and require a detail read before another action,
-  including API errors that can follow durable state transitions. Recovery never replays a mutation.
+  including API errors that can follow durable state transitions. The journal badge stays unverified
+  when current audit evidence is unavailable. Recovery never replays a mutation.
 
 - Refresh selected transaction details from a new snapshot after a completed action, even when
   navigating away and back left an earlier detail read pending. Late older results and errors

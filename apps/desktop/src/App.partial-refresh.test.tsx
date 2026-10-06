@@ -245,6 +245,10 @@ for (const scenario of scenarios) {
         await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
         expect(api.reads()).toBe(2);
         expect(api.posts()).toBe(1);
+        if (secondary.some((endpoint) => endpoint.startsWith("audit-"))) {
+          expect(screen.getByText("Journal unverified")).toBeTruthy();
+          expect(screen.queryByText("Checking journal")).toBeNull();
+        }
         expect(screen.queryByText("Action stopped safely")).toBeNull();
         expect(
           screen.queryByRole("button", { name: scenario.action }),
@@ -271,6 +275,8 @@ for (const scenario of scenarios) {
         await waitFor(() =>
           expect(screen.queryByLabelText("View refresh recovery")).toBeNull(),
         );
+        expect(screen.getByText("0 events verified")).toBeTruthy();
+        expect(screen.queryByText("Journal unverified")).toBeNull();
         expect(api.requests.slice(checkpoint)).toHaveLength(3);
         expect(
           api.requests
@@ -308,6 +314,8 @@ for (const scenario of scenarios) {
         name: "Refreshing views",
       }).disabled,
     ).toBe(true);
+    expect(screen.getByText("Journal unverified")).toBeTruthy();
+    expect(screen.queryByText("Checking journal")).toBeNull();
     if (scenario.route === "run")
       expect(
         screen.getByRole<HTMLButtonElement>("button", { name: "Roll back" })

@@ -696,7 +696,7 @@ function Header({
             ? `${audit?.events_checked ?? 0} events verified`
             : integrity === "invalid"
               ? "Journal integrity failed"
-              : "Checking journal"}
+              : "Journal unverified"}
         </span>
         <button
           className="icon-button"

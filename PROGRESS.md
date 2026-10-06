@@ -1847,6 +1847,8 @@ and must pass on the exact candidate before merge.
   coalesced GET-only **Retry views**. Detail-only recovery remains separate. Older list/audit
   completions cannot replace newer refresh results; an unmounted mutation cannot launch new reads.
   List/audit pagination waits for current collections and rejects superseded page responses.
+  Screenshot review caught a stale “Checking journal” label after audit failure; its null-state
+  label now honestly says “Journal unverified,” covered in synthetic and real-daemon assertions.
 - Removed the misleading “Action stopped safely” error heading. Every action error now invalidates
   selected detail and offers GET recovery, including a 409 that can follow a manual-recovery state
   transition. A successful HTTP response is not a claim that the transaction committed; the bundle
