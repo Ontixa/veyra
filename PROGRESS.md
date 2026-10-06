@@ -1786,3 +1786,53 @@ remain discovered and type-checked. Cargo and the daemon are absent locally, so 
 Rust/OSS/package gates, and native/Windows validation remain required on the exact hosted head.
 The existing development-only `source-map-js` advisory and passing production-audit scope described
 above are unchanged by this fixture repair.
+
+## 2026-10-06 - patch the development source-map dependency
+
+- Resolved the existing development-only `source-map-js` advisory
+  [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) by changing only its
+  lockfile resolution from 1.2.1 to 1.2.2. Both PostCSS 8.5.26 and css-tree 3.2.1 already accept
+  `^1.2.1`; every other resolved version, manifest, runtime minimum, and dependency policy is unchanged.
+- Verified the official [1.2.2 release](https://github.com/7rulnik/source-map-js/releases/tag/v1.2.2)
+  and four-commit upstream diff: indexed-map validation/serialization repairs, a CSP fallback,
+  regression coverage, and release metadata. The maintained upstream published the stable patch on
+  September 30, 2026. Its npm archive matches the registry SHA-512 and SHA-1 digests, and both
+  registry signatures validate against the registry's public key. The archive retains BSD-3-Clause
+  license text (Apache-2.0 compatible), declares Node `>=0.10.0`, and adds no runtime dependencies;
+  Veyra's supported Node 22/24 toolchains and existing Dependabot coverage are preserved.
+- Before the patch, the full npm audit reported one high-severity development advisory across the
+  Vite/PostCSS and jsdom/css-tree paths; the configured production audit was clean. Afterward both
+  full and production audits report zero known vulnerabilities. This is public upstream advisory
+  remediation, not evidence of a Veyra runtime exploit; no resource-exhausting exploit was run.
+
+Passed locally on Linux with Node 24.19.0 and pinned pnpm 11.20.0:
+
+```text
+corepack pnpm install --frozen-lockfile
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm release:check
+corepack pnpm audit --audit-level high
+corepack pnpm audit --prod --audit-level high
+node packages/protocol-schema/scripts/verify-generated.mjs
+corepack pnpm --filter @veyra/desktop exec playwright test --list
+npm pack --dry-run --json  # in each public npm package after build
+git diff --check
+```
+
+The frozen install accepted all 163 lockfile entries under existing supply-chain policy. Tests pass:
+39 desktop, 8 SDK, 3 schema, and 36 release-control tests, with six existing PowerShell-only skips.
+All 27 release assertions and 16 generated-schema checks pass; both real-daemon E2E cases remain
+discoverable. The two npm package dry runs retain their required licenses, READMEs, metadata, and
+expected schema/SDK files without local artifacts. Reverse-substitution of the source-map version
+and integrity restores the original lockfile byte-for-byte; all implementation and test files are
+unchanged.
+
+Local limits: `bash ./scripts/verify.sh`, `corepack pnpm oss:check`, and
+`corepack pnpm package:check` were attempted and blocked by absent Cargo. Rust checks, cargo-deny,
+Rust package inspection, evals, native Tauri, Windows, minimum-Node execution, real-daemon E2E, and
+browser checks were not run locally. Required hosted gates and dependency review remain unchanged
+and must pass on the exact candidate before merge.
