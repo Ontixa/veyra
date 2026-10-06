@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
 
 const tokenFile = process.env.VEYRA_E2E_TOKEN_FILE;
 
@@ -157,16 +157,38 @@ test("completed mutations refresh after navigating away and back during a pendin
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   const seed = async () => {
-    const response = page.waitForResponse(
-      (item) =>
-        item.url().endsWith("/demo/seed") && item.request().method() === "POST",
-    );
-    await page.getByRole("button", { name: "Create transaction" }).click();
-    const result = await (await response).json();
-    await expect(
-      page.getByRole("button", { name: "Review effects" }),
-    ).toBeEnabled();
-    return result.submission.transaction.id as string;
+    const url = new URL("demo/seed", apiUrl).href;
+    const captured: { id?: string } = {};
+    let posts = 0;
+    const captureSeed = async (route: Route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      posts += 1;
+      // APIResponse avoids Chromium's transient Network.getResponseBody lookup.
+      const response = await route.fetch({ maxRetries: 0, maxRedirects: 0 });
+      expect(response.status()).toBe(201);
+      const result = await response.json();
+      captured.id = result.submission.transaction.id as string;
+      await route.fulfill({ response });
+    };
+    await page.route(url, captureSeed);
+    try {
+      await page.getByRole("button", { name: "Create transaction" }).click();
+      await expect.poll(() => captured.id).toEqual(expect.any(String));
+      const id = captured.id!;
+      await expect(page.locator(".inspector-heading .eyebrow")).toContainText(
+        `${id.slice(0, 8)}…${id.slice(-4)}`,
+      );
+      await expect(
+        page.getByRole("button", { name: "Review effects" }),
+      ).toBeEnabled();
+      expect(posts).toBe(1);
+      return id;
+    } finally {
+      await page.unroute(url, captureSeed);
+    }
   };
   const otherId = await seed();
   const id = await seed();
