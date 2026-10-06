@@ -94,6 +94,19 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   const [audit, setAudit] = useState<AuditVerification | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [viewRefresh, setViewRefresh] = useState<{
+    pending: boolean;
+    errors: string[];
+    action: string;
+  } | null>(null);
+  const [completedId, setCompletedId] = useState<string | null>(null);
+  const lifecycleRef = useRef(0);
+  const transactionListRequestRef = useRef(0);
+  const auditRequestRef = useRef(0);
+  const viewRefreshRequestRef = useRef(0);
+  const viewRefreshActionRef = useRef("");
+  const viewRefreshInFlightRef = useRef<Promise<void> | null>(null);
+  const mutationInFlightRef = useRef(false);
   const [theme, setTheme] = useState<Theme>(() => preferredTheme());
   const [approvers, setApprovers] = useState<Record<string, string>>(() =>
     storedApprovers(),
@@ -108,7 +121,9 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   selectedIdRef.current = selectedId;
 
   const refreshTransactions = useCallback(async () => {
+    const request = ++transactionListRequestRef.current;
     const page = await client.listTransactionPage({ limit: 100 });
+    if (request !== transactionListRequestRef.current) return;
     setTransactions(page.items);
     setTransactionCursor(page.next_cursor);
     setSelectedId((current) => current ?? page.items[0]?.id ?? null);
@@ -153,17 +168,27 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   );
 
   const refreshAudit = useCallback(async () => {
+    const request = ++auditRequestRef.current;
+    setAudit(null);
     const [page, verification] = await Promise.all([
       client.auditEventPage({ limit: 200 }),
       client.verifyAudit(),
     ]);
+    if (request !== auditRequestRef.current) return;
     setEvents(page.items.slice().reverse());
     setAuditCursor(page.next_cursor);
     setAudit(verification);
   }, [client]);
 
   const loadMoreTransactions = useCallback(async () => {
-    if (transactionCursor === null) return;
+    if (
+      transactionCursor === null ||
+      viewRefresh !== null ||
+      viewRefreshInFlightRef.current !== null ||
+      mutationInFlightRef.current
+    )
+      return;
+    const request = transactionListRequestRef.current;
     setBusy("Loading older transactions");
     setError(null);
     try {
@@ -171,17 +196,26 @@ function ControlPlane({ client }: { client: VeyraClient }) {
         limit: 100,
         cursor: transactionCursor,
       });
+      if (request !== transactionListRequestRef.current) return;
       setTransactions((current) => appendUnique(current, page.items));
       setTransactionCursor(page.next_cursor);
     } catch (caught: unknown) {
-      setError(messageOf(caught));
+      if (request === transactionListRequestRef.current)
+        setError(messageOf(caught));
     } finally {
-      setBusy(null);
+      if (request === transactionListRequestRef.current) setBusy(null);
     }
-  }, [client, transactionCursor]);
+  }, [client, transactionCursor, viewRefresh]);
 
   const loadMoreAudit = useCallback(async () => {
-    if (auditCursor === null) return;
+    if (
+      auditCursor === null ||
+      viewRefresh !== null ||
+      viewRefreshInFlightRef.current !== null ||
+      mutationInFlightRef.current
+    )
+      return;
+    const request = auditRequestRef.current;
     setBusy("Loading older audit evidence");
     setError(null);
     try {
@@ -189,16 +223,17 @@ function ControlPlane({ client }: { client: VeyraClient }) {
         limit: 200,
         cursor: auditCursor,
       });
+      if (request !== auditRequestRef.current) return;
       setEvents((current) =>
         appendUnique(page.items.slice().reverse(), current),
       );
       setAuditCursor(page.next_cursor);
     } catch (caught: unknown) {
-      setError(messageOf(caught));
+      if (request === auditRequestRef.current) setError(messageOf(caught));
     } finally {
-      setBusy(null);
+      if (request === auditRequestRef.current) setBusy(null);
     }
-  }, [auditCursor, client]);
+  }, [auditCursor, client, viewRefresh]);
 
   const loadMoreBundleEvents = useCallback(async () => {
     if (bundle === null || bundle.events_next_cursor === null) return;
@@ -233,10 +268,17 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   }, [theme]);
 
   useEffect(() => {
-    void refreshTransactions().catch((caught: unknown) =>
-      setError(messageOf(caught)),
-    );
-    void refreshAudit().catch((caught: unknown) => setError(messageOf(caught)));
+    const transactions = refreshTransactions();
+    const transactionRequest = transactionListRequestRef.current;
+    void transactions.catch((caught: unknown) => {
+      if (transactionRequest === transactionListRequestRef.current)
+        setError(messageOf(caught));
+    });
+    const audit = refreshAudit();
+    const auditRequest = auditRequestRef.current;
+    void audit.catch((caught: unknown) => {
+      if (auditRequest === auditRequestRef.current) setError(messageOf(caught));
+    });
   }, [refreshAudit, refreshTransactions]);
 
   useEffect(() => {
@@ -253,24 +295,92 @@ function ControlPlane({ client }: { client: VeyraClient }) {
     };
   }, [loadBundle, selectedId]);
 
+  useEffect(() => {
+    return () => {
+      lifecycleRef.current += 1;
+      transactionListRequestRef.current += 1;
+      auditRequestRef.current += 1;
+      viewRefreshRequestRef.current += 1;
+      viewRefreshInFlightRef.current = null;
+    };
+  }, [client]);
+
+  const refreshViews = useCallback(
+    (completedAction?: string) => {
+      if (
+        completedAction === undefined &&
+        viewRefreshInFlightRef.current !== null
+      )
+        return viewRefreshInFlightRef.current;
+      const request = ++viewRefreshRequestRef.current;
+      const action = completedAction ?? viewRefreshActionRef.current;
+      viewRefreshActionRef.current = action;
+      setViewRefresh({ pending: true, errors: [], action });
+      const promise = (async () => {
+        const results = await Promise.allSettled([
+          refreshTransactions(),
+          refreshAudit(),
+        ]);
+        if (request !== viewRefreshRequestRef.current) return;
+        const errors = results.flatMap((result, index) =>
+          result.status === "rejected"
+            ? [
+                `${index === 0 ? "Transaction list" : "Audit"}: ${messageOf(result.reason)}`,
+              ]
+            : [],
+        );
+        setViewRefresh(
+          errors.length === 0 ? null : { pending: false, errors, action },
+        );
+        viewRefreshInFlightRef.current = null;
+      })();
+      viewRefreshInFlightRef.current = promise;
+      return promise;
+    },
+    [refreshAudit, refreshTransactions],
+  );
+
   const perform = useCallback(
-    async (label: string, operation: () => Promise<unknown>, id?: string) => {
+    async (label: string, operation: () => Promise<unknown>, id: string) => {
+      if (mutationInFlightRef.current) return;
+      mutationInFlightRef.current = true;
+      const lifecycle = lifecycleRef.current;
       setBusy(label);
       setError(null);
+      setCompletedId(null);
       try {
         await operation();
-        await refreshTransactions();
-        await refreshAudit();
-        const target = id ?? selectedId;
-        if (target !== null && selectedIdRef.current === target)
-          await loadBundle(target, true);
       } catch (caught: unknown) {
-        setError(messageOf(caught));
-      } finally {
+        if (lifecycle !== lifecycleRef.current) return;
+        setError(`Action outcome not confirmed: ${messageOf(caught)}`);
+        if (selectedIdRef.current === id) {
+          // Even an API error can follow a durable state transition.
+          // Invalidate pre-action reads; recovery must read before another action.
+          bundleRequestRef.current += 1;
+          bundleInFlightRef.current = null;
+          setBundle(null);
+          setBundleLoad({
+            status: "error",
+            error:
+              "Read the current transaction details before deciding what to do next.",
+          });
+        }
+        mutationInFlightRef.current = false;
         setBusy(null);
+        return;
       }
+      if (lifecycle !== lifecycleRef.current) return;
+      setCompletedId(id);
+      // Detail ownership is independent of secondary reads. Their SDK deadlines
+      // stay bounded, and a slow list/audit must not hold the next action busy.
+      const detail = loadBundle(id, true);
+      void refreshViews(`${label} · ${shortId(id)}`);
+      await detail;
+      if (lifecycle !== lifecycleRef.current) return;
+      mutationInFlightRef.current = false;
+      setBusy(null);
     },
-    [loadBundle, refreshAudit, refreshTransactions, selectedId],
+    [loadBundle, refreshViews],
   );
 
   const seedIntent = async () => {
@@ -377,7 +487,7 @@ function ControlPlane({ client }: { client: VeyraClient }) {
               {transactionCursor !== null && (
                 <button
                   className="pagination-button"
-                  disabled={busy !== null}
+                  disabled={busy !== null || viewRefresh !== null}
                   onClick={() => void loadMoreTransactions()}
                 >
                   Load older transactions
@@ -411,7 +521,7 @@ function ControlPlane({ client }: { client: VeyraClient }) {
               {auditCursor !== null && (
                 <button
                   className="pagination-button"
-                  disabled={busy !== null}
+                  disabled={busy !== null || viewRefresh !== null}
                   onClick={() => void loadMoreAudit()}
                 >
                   Load older evidence
@@ -431,12 +541,41 @@ function ControlPlane({ client }: { client: VeyraClient }) {
         <main className="content" aria-live="polite">
           {error !== null && (
             <div className="error-banner" role="alert">
-              <strong>Action stopped safely</strong>
+              <strong>Request failed</strong>
               <span>{error}</span>
               <button aria-label="Dismiss error" onClick={() => setError(null)}>
                 ×
               </button>
             </div>
+          )}
+          {viewRefresh !== null && (
+            <section
+              className="recovery-banner"
+              aria-label="View refresh recovery"
+            >
+              <strong>
+                {viewRefresh.pending
+                  ? "Refreshing views"
+                  : "View refresh incomplete"}
+              </strong>
+              <p>Completed request: {viewRefresh.action}</p>
+              <p>
+                The transaction list or audit evidence may be out of date. Retry
+                reads these views only; it never repeats an action.
+              </p>
+              {viewRefresh.errors.map((message) => (
+                <p key={message} role="alert">
+                  {message}
+                </p>
+              ))}
+              <button
+                className="secondary-button"
+                disabled={viewRefresh.pending || busy !== null}
+                onClick={() => void refreshViews()}
+              >
+                {viewRefresh.pending ? "Refreshing views" : "Retry views"}
+              </button>
+            </section>
           )}
           {busy !== null && <LoadingBar label={busy} />}
           {view === "audit" ? (
@@ -450,6 +589,12 @@ function ControlPlane({ client }: { client: VeyraClient }) {
             >
               <p className="eyebrow">Transaction / {shortId(selectedId)}</p>
               <h1>Could not load transaction</h1>
+              {completedId === selectedId && (
+                <p>
+                  The action request completed, but its current details are
+                  unavailable.
+                </p>
+              )}
               <p role="alert">{bundleLoad.error}</p>
               <p>
                 Retry reads this transaction's details only. It does not repeat
@@ -551,7 +696,7 @@ function Header({
             ? `${audit?.events_checked ?? 0} events verified`
             : integrity === "invalid"
               ? "Journal integrity failed"
-              : "Checking journal"}
+              : "Journal unverified"}
         </span>
         <button
           className="icon-button"

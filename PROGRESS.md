@@ -1836,3 +1836,58 @@ Local limits: `bash ./scripts/verify.sh`, `corepack pnpm oss:check`, and
 Rust package inspection, evals, native Tauri, Windows, minimum-Node execution, real-daemon E2E, and
 browser checks were not run locally. Required hosted gates and dependency review remain unchanged
 and must pass on the exact candidate before merge.
+
+## 2026-10-06 - keep mutation outcomes separate from view refresh failures
+
+- A confirmed preview, approval, execution, or rollback response now immediately starts a fresh
+  selected-detail read, independently of list and audit refresh. Current detail releases mutation
+  busy state even if a secondary read is delayed; existing SDK requests retain their 60-second
+  deadline. Unknown detail hides mutation controls, and PR73's selection/request ownership remains.
+- Added a separate partial-refresh notice naming the completed request and transaction, plus
+  coalesced GET-only **Retry views**. Detail-only recovery remains separate. Older list/audit
+  completions cannot replace newer refresh results; an unmounted mutation cannot launch new reads.
+  List/audit pagination waits for current collections and rejects superseded page responses.
+  Screenshot review caught a stale “Checking journal” label after audit failure; its null-state
+  label now honestly says “Journal unverified,” covered in synthetic and real-daemon assertions.
+- Removed the misleading “Action stopped safely” error heading. Every action error now invalidates
+  selected detail and offers GET recovery, including a 409 that can follow a manual-recovery state
+  transition. A successful HTTP response is not a claim that the transaction committed; the bundle
+  remains authoritative. No POST replay, authority check, protocol, persistence, dependency, or
+  migration contract changed. The broader supervised manual-recovery roadmap item remains open.
+- Added 53 focused desktop cases covering all four actions, separate/combined secondary and detail
+  failures, delayed reads, repeated recovery, A→B and A→B→A selection, transport/JSON/HTTP errors,
+  409/manual recovery, and unmount. Updated the existing failed-action navigation case to require
+  a current read; successful-mutation ordering tests are unchanged. Four desired regressions fail
+  on the exact original main App before this correction.
+- Added a separate real-daemon browser case for execution and rollback with interrupted secondary
+  GETs, independent daemon and workspace-file inspection, unchanged evidence after GET recovery,
+  exact mutation counts, keyboard recovery, and desktop/narrow screenshots. The PR74 shared
+  seed/GET gates and original two case bodies remain unchanged; the added case runs afterward in
+  the same spec to preserve shared-daemon sequencing.
+
+Passed locally on Linux with Node 24.19.0 and pinned pnpm 11.20.0:
+
+```text
+corepack pnpm install --frozen-lockfile --offline
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm release:check
+corepack pnpm audit --audit-level high
+corepack pnpm audit --prod --audit-level high
+node packages/protocol-schema/scripts/verify-generated.mjs
+corepack pnpm --filter @veyra/desktop exec playwright test --list
+git diff --check
+```
+
+The frozen install uses the existing package store with no dependency changes. Tests pass: 92
+desktop, 8 SDK, 3 schema, and 36 release-control tests, with six existing PowerShell-only skips.
+Both npm audits report zero known vulnerabilities. Both public npm package dry runs preserve their
+expected files and licenses. All three real-daemon browser cases are discovered and type-checked, but are not local browser evidence.
+
+Local limits: `bash ./scripts/verify.sh`, `corepack pnpm oss:check`, and
+`corepack pnpm package:check` were attempted and blocked by absent Cargo. Rust 1.96, cargo-deny,
+Rust package inspection, evals, native Tauri, Windows, minimum-Node execution, real-daemon E2E,
+and screenshot review remain required on the exact hosted candidate before merge.

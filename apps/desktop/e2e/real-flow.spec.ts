@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Request, type Route } from "@playwright/test";
 
 const tokenFile = process.env.VEYRA_E2E_TOKEN_FILE;
 
@@ -294,4 +295,179 @@ test("completed mutations refresh after navigating away and back during a pendin
     path: testInfo.outputPath("navigation-rolled-back-desktop.png"),
     fullPage: true,
   });
+});
+
+test("confirmed execution and rollback survive secondary read failures without replay", async ({
+  page,
+}, testInfo) => {
+  const tokenFile = process.env.VEYRA_E2E_TOKEN_FILE;
+  test.skip(
+    tokenFile === undefined,
+    "set VEYRA_E2E_TOKEN_FILE to a running local instance token",
+  );
+  const apiUrl = process.env.VEYRA_E2E_API_URL ?? "http://127.0.0.1:7843/v1/";
+  const token = (await readFile(tokenFile!, "utf8")).trim();
+  // The CI daemon's workspace is beside its data directory. An external fixture
+  // can explicitly select its workspace without changing that shared fixture.
+  const workspace =
+    process.env.VEYRA_E2E_WORKSPACE ??
+    resolve(dirname(tokenFile!), "..", "workspace");
+  await page.addInitScript(
+    ({ endpoint, localToken }) => {
+      localStorage.setItem("veyra.apiUrl", endpoint);
+      localStorage.setItem("veyra.token", localToken);
+    },
+    { endpoint: apiUrl, localToken: token },
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  const content = "Secondary read recovery fixture.\n";
+  await page
+    .getByLabel("Public content for a reversible workspace note")
+    .fill(content);
+  const seedUrl = new URL("demo/seed", apiUrl).href;
+  const captured: { id?: string; path?: string } = {};
+  let seedPosts = 0;
+  const captureSeed = async (route: Route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+    seedPosts += 1;
+    const response = await route.fetch({ maxRetries: 0, maxRedirects: 0 });
+    expect(response.status()).toBe(201);
+    const result = await response.json();
+    captured.id = result.submission.transaction.id as string;
+    captured.path = result.submission.intent.context.path as string;
+    await route.fulfill({ response });
+  };
+  await page.route(seedUrl, captureSeed);
+  await page.getByRole("button", { name: "Create transaction" }).click();
+  await expect.poll(() => captured.id).toEqual(expect.any(String));
+  await expect(page.locator(".inspector-heading .eyebrow")).toContainText(
+    `${captured.id!.slice(0, 8)}…${captured.id!.slice(-4)}`,
+  );
+  await expect(
+    page.getByRole("button", { name: "Review effects" }),
+  ).toBeEnabled();
+  await page.unroute(seedUrl, captureSeed);
+  expect(seedPosts).toBe(1);
+  expect(captured.path).toMatch(/^demo\/hello-[a-f0-9]+\.txt$/);
+  const filePath = resolve(workspace, captured.path!);
+  const bundleUrl = new URL(`transactions/${captured.id!}/bundle`, apiUrl).href;
+  const inspectDaemon = async () => {
+    const response = await page.request.get(bundleUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(response.status()).toBe(200);
+    return response.json();
+  };
+  await page.getByRole("button", { name: "Review effects" }).click();
+  await page.getByRole("button", { name: "Grant approval" }).click();
+  await expect(
+    page.getByRole("button", { name: "Execute transaction" }),
+  ).toBeEnabled();
+  let mutations = 0;
+  let bundleReads = 0;
+  const count = (request: Request) => {
+    if (request.url() === bundleUrl && request.method() === "GET")
+      bundleReads += 1;
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method()))
+      mutations += 1;
+  };
+  page.on("request", count);
+  const state = page.locator(".heading-meta .state-badge");
+  for (const operation of ["run", "rollback"] as const) {
+    const isRun = operation === "run";
+    const secondaryUrl = new URL(
+      isRun ? "audit/verify" : "transactions/page",
+      apiUrl,
+    ).href;
+    let secondaryReads = 0;
+    const failOnce = async (route: Route) => {
+      expect(route.request().method()).toBe("GET");
+      secondaryReads += 1;
+      if (secondaryReads === 1) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: {
+              code: "unavailable",
+              message: "Synthetic secondary read interruption",
+            },
+          }),
+        });
+      } else {
+        await route.continue();
+      }
+    };
+    await page.route(`${secondaryUrl}*`, failOnce);
+    const readsBefore = bundleReads;
+    await page
+      .getByRole("button", {
+        name: isRun ? "Execute transaction" : "Roll back",
+        exact: true,
+      })
+      .click();
+    await expect(state).toHaveText(isRun ? "Committed" : "Rolled back");
+    await expect(page.getByText("View refresh incomplete")).toBeVisible();
+    if (isRun) await expect(page.getByText("Journal unverified")).toBeVisible();
+    expect(bundleReads).toBe(readsBefore + 1);
+    await expect(page.getByText("Action stopped safely")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Execute transaction" }),
+    ).toHaveCount(0);
+    const beforeRecovery = await inspectDaemon();
+    expect(beforeRecovery.transaction.state).toBe(
+      isRun ? "committed" : "rolled_back",
+    );
+    if (isRun) {
+      expect(await readFile(filePath, "utf8")).toBe(content);
+      await expect(
+        page.getByRole("button", { name: "Roll back" }),
+      ).toBeEnabled();
+    } else {
+      await expect(readFile(filePath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+    await page.screenshot({
+      path: testInfo.outputPath(`partial-${operation}-desktop.png`),
+      fullPage: true,
+    });
+    await page.setViewportSize({ width: 760, height: 900 });
+    const retry = page.getByRole("button", {
+      name: "Retry views",
+      exact: true,
+    });
+    await expect(retry).toBeEnabled();
+    await page.screenshot({
+      path: testInfo.outputPath(`partial-${operation}-narrow.png`),
+      fullPage: true,
+    });
+    await retry.focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      page.getByRole("region", { name: "View refresh recovery" }),
+    ).toHaveCount(0);
+    await expect(page.locator(".integrity")).toContainText("events verified");
+    expect(secondaryReads).toBe(2);
+    expect(bundleReads).toBe(readsBefore + 1);
+    expect(mutations).toBe(isRun ? 1 : 2);
+    const afterRecovery = await inspectDaemon();
+    expect(afterRecovery).toEqual(beforeRecovery);
+    if (isRun) expect(await readFile(filePath, "utf8")).toBe(content);
+    else
+      await expect(readFile(filePath)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    await page.screenshot({
+      path: testInfo.outputPath(`partial-${operation}-recovered-narrow.png`),
+      fullPage: true,
+    });
+    await page.unroute(`${secondaryUrl}*`, failOnce);
+    await page.setViewportSize({ width: 1440, height: 900 });
+  }
+  page.off("request", count);
 });

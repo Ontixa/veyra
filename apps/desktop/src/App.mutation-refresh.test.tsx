@@ -170,7 +170,18 @@ function setup(scenario: Scenario) {
         }),
       );
     },
-    failMutation: () => mutation.resolve(failure("Mutation refused")),
+    failMutation: () =>
+      mutation.resolve(
+        Response.json(
+          {
+            error: {
+              code: "transaction_conflict",
+              message: "Mutation refused",
+            },
+          },
+          { status: 409 },
+        ),
+      ),
     oldRead,
     freshRead,
   };
@@ -295,21 +306,26 @@ describe("mutation refresh versus pending transaction reads", () => {
       expectOneMutation(api);
     });
 
-    it(`${scenario.route}: keeps a mutation failure visible when the navigation read completes`, async () => {
+    it(`${scenario.route}: requires read recovery after a mutation failure and ignores the old navigation read`, async () => {
       const api = setup(scenario);
       render(<App />);
       await startMutation(scenario, api);
       await act(async () => {
         api.failMutation();
       });
-      await screen.findByText("Mutation refused");
+      await screen.findByText(/Action outcome not confirmed: Mutation refused/);
       await act(async () => {
         api.oldRead.resolve(Response.json(bundle("tx-a", scenario.initial)));
       });
-      await screen.findByRole("heading", { name: "Inspect tx-a" });
-      expect(screen.getByRole("alert").textContent).toContain(
-        "Mutation refused",
-      );
+      expect(
+        screen.queryByRole("heading", { name: "Inspect tx-a" }),
+      ).toBeNull();
+      expect(
+        screen.getByRole("heading", { name: "Could not load transaction" }),
+      ).toBeTruthy();
+      expect(
+        screen.getByText(/Action outcome not confirmed: Mutation refused/),
+      ).toBeTruthy();
       expect(api.reads()).toBe(2);
       expectOneMutation(api);
     });
