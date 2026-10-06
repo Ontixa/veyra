@@ -111,6 +111,13 @@ Changelog conventions.
   (skipped with a printed reason otherwise), and reserved device names, alternate data streams,
   trailing dot/space, UNC, and `\\?\` spellings are rejected lexically.
 
+### Security
+
+- Updated the development-only `source-map-js` lockfile resolution from 1.2.1 to 1.2.2 for
+  [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q), addressing denial of
+  service from malformed indexed source maps in build and test tooling. Existing dependency
+  ranges, supported Node versions, and production dependencies are unchanged.
+
 ## [0.1.0] - 2026-08-24
 
 ### Added
