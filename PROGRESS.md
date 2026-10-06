@@ -1749,3 +1749,40 @@ review before merge. The broader `corepack pnpm audit --audit-level high` report
 [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q), fixed in 1.2.2. The lockfile
 and dependency policy remain unchanged; this existing development-tool advisory is separate from
 the passing production audit and is not claimed resolved by this desktop repair.
+
+## 2026-10-06 - stabilize the real-daemon navigation fixture
+
+- The mutation-refresh repair passed all pull-request gates and both real-daemon scenarios before
+  merge. Its first postmerge run passed the original E2E but stopped during the second synthetic
+  seed in the new scenario: Chromium's `Network.getResponseBody` could not retrieve the browser
+  response body. No mutation/navigation regression assertion had started; the log does not prove
+  that the application navigated the document or that the daemon failed to create the fixture.
+- The fixture now intercepts the UI seed POST, forwards it exactly once with Playwright's
+  `route.fetch`, reads the retained `APIResponse`, and fulfills the unchanged result to the browser.
+  It explicitly disables request retries and redirects, passes non-POST requests through, verifies
+  HTTP 201 and one POST, checks the selected transaction ID and enabled review control, and removes
+  its handler in `finally`. All preview/execute/rollback ordering assertions remain intact.
+- Compatibility: test-only change. No application, protocol, dependency, authority, persistence,
+  timeout, or retry policy change. The original complete UI transaction flow remains in place.
+  Do not treat a rerun of the failed historical check as evidence of this fixture repair; validate
+  the new exact source head and the resulting main revision.
+
+Local validation uses the pinned Node 24.19.0/pnpm 11.20.0 toolchain:
+
+```text
+corepack pnpm install --frozen-lockfile --offline
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm release:check
+corepack pnpm --filter @veyra/desktop exec playwright test --list
+git diff --check
+```
+
+The JavaScript gates pass (86 tests, six existing PowerShell-only skips); both real-daemon tests
+remain discovered and type-checked. Cargo and the daemon are absent locally, so actual E2E execution,
+Rust/OSS/package gates, and native/Windows validation remain required on the exact hosted head.
+The existing development-only `source-map-js` advisory and passing production-audit scope described
+above are unchanged by this fixture repair.
