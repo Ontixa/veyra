@@ -137,3 +137,139 @@ test("real local transaction is operable at desktop and narrow viewports", async
     page.getByText("Rolled back", { exact: true }).first(),
   ).toBeVisible();
 });
+
+test("completed mutations refresh after navigating away and back during a pending read", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    tokenFile === undefined,
+    "set VEYRA_E2E_TOKEN_FILE to a running local instance token",
+  );
+  const apiUrl = process.env.VEYRA_E2E_API_URL ?? "http://127.0.0.1:7843/v1/";
+  const token = (await readFile(tokenFile!, "utf8")).trim();
+  await page.addInitScript(
+    ({ endpoint, localToken }) => {
+      localStorage.setItem("veyra.apiUrl", endpoint);
+      localStorage.setItem("veyra.token", localToken);
+    },
+    { endpoint: apiUrl, localToken: token },
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+  const seed = async () => {
+    const response = page.waitForResponse(
+      (item) =>
+        item.url().endsWith("/demo/seed") && item.request().method() === "POST",
+    );
+    await page.getByRole("button", { name: "Create transaction" }).click();
+    const result = await (await response).json();
+    await expect(
+      page.getByRole("button", { name: "Review effects" }),
+    ).toBeEnabled();
+    return result.submission.transaction.id as string;
+  };
+  const otherId = await seed();
+  const id = await seed();
+  const shortId = (value: string) => `${value.slice(0, 8)}…${value.slice(-4)}`;
+  const state = page.locator(".heading-meta .state-badge");
+
+  const navigateDuringMutation = async (
+    action: string,
+    operation: string,
+    expectedState: string,
+  ) => {
+    let releaseMutation!: () => void;
+    let releaseRead!: () => void;
+    const mutationGate = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let mutations = 0;
+    let reads = 0;
+    let snapshotReady = false;
+    let oldReadDelivered!: () => void;
+    const delivered = new Promise<void>((resolve) => {
+      oldReadDelivered = resolve;
+    });
+    const mutationUrl = new URL(`transactions/${id}/${operation}`, apiUrl).href;
+    const bundleUrl = new URL(`transactions/${id}/bundle`, apiUrl).href;
+    await page.route(mutationUrl, async (route) => {
+      mutations += 1;
+      await mutationGate;
+      await route.continue();
+    });
+    await page.route(bundleUrl, async (route) => {
+      reads += 1;
+      if (reads === 1) {
+        // Capture the real daemon's old snapshot before allowing the mutation.
+        const response = await route.fetch();
+        snapshotReady = true;
+        await readGate;
+        await route.fulfill({ response });
+        oldReadDelivered();
+      } else {
+        await route.continue();
+      }
+    });
+    try {
+      const control = page.getByRole("button", { name: action, exact: true });
+      await control.focus();
+      await page.keyboard.press("Enter");
+      await expect.poll(() => mutations).toBe(1);
+      await page
+        .getByRole("button")
+        .filter({ has: page.getByText(shortId(otherId), { exact: true }) })
+        .click();
+      await expect(page.locator(".inspector-heading .eyebrow")).toContainText(
+        shortId(otherId),
+      );
+      await page
+        .getByRole("button")
+        .filter({ has: page.getByText(shortId(id), { exact: true }) })
+        .click();
+      await expect.poll(() => snapshotReady).toBe(true);
+      await expect(page.getByLabel("Loading transaction")).toBeVisible();
+      releaseMutation();
+      await expect.poll(() => reads).toBe(2);
+      await expect(state).toHaveText(expectedState);
+      await expect(page.getByRole("status")).toHaveCount(0);
+      releaseRead();
+      await delivered;
+      await expect(state).toHaveText(expectedState);
+      await expect(page.getByRole("alert")).toHaveCount(0);
+      expect(mutations).toBe(1);
+    } finally {
+      releaseMutation();
+      releaseRead();
+      await page.unroute(mutationUrl);
+      await page.unroute(bundleUrl);
+    }
+  };
+
+  await navigateDuringMutation(
+    "Review effects",
+    "preview",
+    "Awaiting approval",
+  );
+  await page.getByRole("button", { name: "Grant approval" }).click();
+  await expect(
+    page.getByRole("button", { name: "Execute transaction" }),
+  ).toBeEnabled();
+  await page.setViewportSize({ width: 760, height: 900 });
+  await navigateDuringMutation("Execute transaction", "run", "Committed");
+  await expect(page.getByRole("button", { name: "Roll back" })).toBeEnabled();
+  await expect(page.getByText("Postconditions satisfied")).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("navigation-committed-narrow.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await navigateDuringMutation("Roll back", "rollback", "Rolled back");
+  await expect(page.getByRole("button", { name: "Roll back" })).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("navigation-rolled-back-desktop.png"),
+    fullPage: true,
+  });
+});

@@ -1696,3 +1696,56 @@ attempted but the local GitHub CLI is unauthenticated. Authenticated connector r
 main rules with no bypass actor and all six required check contexts; the connector does not expose
 Actions permission-policy endpoints, so a full host-policy pass is not claimed. Existing required
 checks and security/dependency gates are unchanged.
+
+## 2026-10-06 - refresh completed mutations after transaction navigation
+
+- Reproduced a regression in detail-read coalescing: start a preview, execution, or rollback on A,
+  navigate A/B/A while the action is pending, and hold the newly selected A detail read. Action
+  completion reused that pre-completion request, leaving the inspector at an older state and
+  potentially hiding rollback after a successful execution.
+- Completed actions now request a fresh bundle generation. Ordinary selection and read-only retry
+  requests still coalesce; the existing generation and selected-ID checks discard both obsolete
+  results and errors. The completed action does not disturb a newer selection of B.
+- Added 19 component regressions covering all three operations, old success/error before and after
+  the fresh result, staying on B, retained mutation failures, and a failed fresh read followed by
+  late old success and duplicate retry clicks. All 39 desktop tests pass, retaining keyboard retry,
+  repeated read failures, event pagination, integrity errors, and StrictMode coverage. The same new
+  suite against the unchanged baseline produces 13 failures and six passing controls.
+- Added a real-daemon Playwright scenario for all three mutations. It holds each POST before
+  forwarding it, captures a real pre-mutation bundle snapshot during A/B/A navigation, then requires
+  a fresh GET and completed inspector state before releasing the old response. It also checks one
+  mutation per operation, keyboard activation, rollback availability, desktop/narrow widths, and
+  synthetic screenshots through the existing CI artifact flow.
+- Compatibility: patch-level desktop behavior only. No protocol, SDK API, persistence, authority,
+  dependency, approval, or transaction-transition changes. No migration or new permission is needed.
+  This repair never replays a write and does not resolve manual-recovery outcomes. Existing request
+  timeout and size bounds apply; list or audit refresh failures retain their existing behavior.
+
+Local verification on Linux with Node 24.19.0 and pnpm 11.20.0:
+
+```text
+corepack pnpm install --frozen-lockfile --offline
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm release:check
+corepack pnpm audit --prod --audit-level high
+corepack pnpm --filter @veyra/desktop exec playwright test --list
+git diff --check
+```
+
+These checks passed: 86 tests (39 desktop, 8 SDK, 3 schema, and 36 release-control), six existing
+PowerShell-only skips, 27 release assertions, no known production npm vulnerabilities, and two
+real-daemon E2E cases discovered and type-checked. An independent review additionally exercised 14
+synthetic mutation/response-order and navigation cases successfully.
+
+Local limitations: `bash ./scripts/verify.sh`, `oss:check`, and `package:check` were attempted but
+blocked by absent Cargo. Rust, eval, native Tauri, Windows, real-daemon execution, and browser visual
+checks were not run locally; the exact candidate's hosted gates and retained screenshots must pass
+review before merge. The broader `corepack pnpm audit --audit-level high` reports the unchanged
+`source-map-js` 1.2.1 development dependency under
+[GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q), fixed in 1.2.2. The lockfile
+and dependency policy remain unchanged; this existing development-tool advisory is separate from
+the passing production audit and is not claimed resolved by this desktop repair.

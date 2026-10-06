@@ -81,6 +81,11 @@ Changelog conventions.
 
 ### Fixed
 
+- Refresh selected transaction details from a new snapshot after a completed action, even when
+  navigating away and back left an earlier detail read pending. Late older results and errors
+  cannot replace the completed state or hide rollback after execution. Read-only retries still
+  coalesce repeated clicks and never repeat a mutation.
+
 - Replaced indefinite desktop transaction loading after a failed bundle read with an explicit
   error and read-only **Retry transaction** control. Repeated failures remain retryable, pending
   retries coalesce, and stale results cannot replace a newer selection. Retry never repeats

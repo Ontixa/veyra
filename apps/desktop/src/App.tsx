@@ -115,11 +115,13 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   }, [client]);
 
   const loadBundle = useCallback(
-    (id: string) => {
+    (id: string, fresh = false) => {
       // An action's delayed refresh must not disturb a newer selection.
       if (selectedIdRef.current !== id) return Promise.resolve();
       const pending = bundleInFlightRef.current;
-      if (pending?.id === id) return pending.promise;
+      // Read-only retries can share a request, but a completed mutation needs a
+      // newer snapshot and must invalidate any read started before it finished.
+      if (pending?.id === id && !fresh) return pending.promise;
       const request = ++bundleRequestRef.current;
       setBundle(null);
       setBundleLoad((current) => ({
@@ -261,7 +263,7 @@ function ControlPlane({ client }: { client: VeyraClient }) {
         await refreshAudit();
         const target = id ?? selectedId;
         if (target !== null && selectedIdRef.current === target)
-          await loadBundle(target);
+          await loadBundle(target, true);
       } catch (caught: unknown) {
         setError(messageOf(caught));
       } finally {

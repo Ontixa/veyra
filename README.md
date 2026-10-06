@@ -203,6 +203,10 @@ If a selected transaction's details cannot be read, the inspector shows an expli
 **Retry transaction**. Retry makes one read-only bundle request and stays disabled while that read
 is pending. It never repeats approval, execution, or rollback. Switching between Audit and
 Transactions preserves the recovery control; selecting another transaction ignores older responses.
+After a successful preview, approval, execution, or rollback, the selected transaction gets a fresh
+bundle read even if an earlier read is still pending. Returning to that transaction while its action
+is pending cannot let an older snapshot hide the completed state or its available controls. A late
+older response cannot replace the fresh result or its read error; recovery still retries only the GET.
 
 ## OpenAI-compatible planning
 
