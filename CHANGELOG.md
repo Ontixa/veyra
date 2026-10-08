@@ -87,6 +87,11 @@ Changelog conventions.
 
 ### Fixed
 
+- The TypeScript SDK now preserves `VeyraApiError` and the HTTP status when an error response has
+  malformed fields. Non-string codes and messages use the existing fallbacks instead of leaking
+  an incorrectly typed code or throwing `message.split is not a function`. Valid API errors retain
+  their existing diagnostics and redaction; requests are not retried.
+
 - Desktop mutation follow-up reads now refresh the selected transaction independently of failed or
   delayed list/audit reads. Partial refresh notices identify the completed request and offer GET-only
   view recovery; stale mutation controls stay hidden until current details are available. Action

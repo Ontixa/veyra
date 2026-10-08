@@ -38,10 +38,6 @@ export interface AuditPageOptions extends PageOptions {
   transactionId?: string;
 }
 
-interface ApiErrorEnvelope {
-  error?: { code?: string; message?: string };
-}
-
 const MAXIMUM_REQUEST_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAXIMUM_RESPONSE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -277,14 +273,17 @@ export class VeyraClient {
         value = undefined;
       }
       if (!response.ok) {
-        const envelope = isObject(value) ? (value as ApiErrorEnvelope) : {};
-        const rawCode = envelope.error?.code;
+        const error =
+          isObject(value) && isObject(value.error) ? value.error : {};
+        const rawCode = error.code;
         const code =
-          rawCode !== undefined && /^[a-z0-9_]{1,64}$/u.test(rawCode)
+          typeof rawCode === "string" && /^[a-z0-9_]{1,64}$/u.test(rawCode)
             ? rawCode
             : "api_error";
         const message = safeErrorMessage(
-          envelope.error?.message ?? "Veyra API request failed",
+          typeof error.message === "string"
+            ? error.message
+            : "Veyra API request failed",
           this.#token,
         );
         throw new VeyraApiError(response.status, code, message);

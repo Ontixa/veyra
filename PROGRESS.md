@@ -1959,3 +1959,51 @@ status-copy pluralization issue. The status now uses **1 visible event** and plu
 other counts, with a focused assertion; this copy-only delta requires fresh exact-head CI.
 Screenshots from the earlier head remain layout evidence, not evidence for the updated text.
 Native WebView file-save behavior was not exercised by these Chromium tests.
+
+## 2026-10-08 — Preserve SDK errors for malformed diagnostic fields
+
+- Reproduced on `0bc03c7d5c6ad97b86ce07730aee489dfe646802`: an HTTP 500 error envelope with
+  an object-valued message became `TypeError: message.split is not a function`, losing the HTTP
+  status and typed API failure. Numeric, boolean, null, and array codes could also survive the
+  regex check with the wrong runtime type. The current Rust daemon emits string fields; this is
+  a malformed-response compatibility correction, not evidence of a failing normal daemon path.
+- Kept decoded fields unknown until checked. Only string codes matching the existing regex and
+  string messages are accepted; other values use the existing fallbacks. HTTP status, valid
+  diagnostics, token redaction, control-character removal, Unicode limits, and one-request
+  behavior are preserved. No public signature, wire type, server, authority, persistence,
+  dependency, transport, or lifecycle behavior changed. This is a patch-compatible correction
+  to the documented SDK error contract, with no package version change.
+- Added synthetic-fetch coverage for null, primitive, array, object, missing, and invalid fields;
+  valid envelopes and empty messages; non-JSON errors; code bounds; and existing redaction and
+  display controls. Nine added cases failed the unchanged source. The corrected SDK suite has
+  39 passing tests. A separate automated source review also passed 540 synthetic combinations.
+
+Passed locally with Node 24.19.0, pnpm 11.20.0, and Rust/Cargo 1.96.0:
+
+```text
+corepack pnpm install --frozen-lockfile --offline
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm oss:check
+corepack pnpm release:check
+corepack pnpm package:check
+corepack pnpm audit --audit-level high
+cargo test --workspace --exclude veyra-desktop --all-targets --all-features --locked
+cargo clippy --workspace --exclude veyra-desktop --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude veyra-desktop --all-features --no-deps --locked
+git diff --check
+```
+
+Results: 39 SDK, 108 desktop, 3 schema, 36 release-control, and 157 non-Tauri Rust tests passed;
+six existing PowerShell-only tests were skipped. OSS checks passed 523 assertions, package checks
+covered seven Rust crates and two npm packages plus 70 publication-plan assertions, and the npm
+audit reported no known vulnerabilities. Dependencies and generated schemas remain unchanged.
+
+Local limit: `bash scripts/verify.sh` passed Rust formatting, then stopped during the full native
+Clippy build because this container lacks `glib-2.0` for Tauri. Full hosted Linux, Windows MSVC,
+minimum-Node, dependency/security, and fuzz checks remain required on the final candidate before
+merge. The SDK regressions use synthetic fetch responses only. No release or deployment is part
+of this correction.
