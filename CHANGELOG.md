@@ -7,6 +7,12 @@ Changelog conventions.
 
 ### Added
 
+- Added **Export visible JSON** to the desktop Audit view: exact displayed API records with search
+  and loaded-window metadata in a local `veyra.desktop-audit-view/v1` snapshot. It makes no extra
+  request and no complete-chain or verification claim. Empty, pending, and failed reads disable
+  export; **Retry audit** provides coalesced read-only recovery, and stale reads cannot replace the
+  current export window.
+
 - Added the versioned precondition-evaluation contract `veyra.preconditions/v1`
   (`docs/protocol/VEP-0002.md`). Effects may now declare filesystem `file_exists` and
   `file_sha256` preconditions, which the adapter evaluates read-only inside the exact declared

@@ -1238,6 +1238,30 @@ pre {
   margin-bottom: 17px;
 }
 
+.audit-export {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 17px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.audit-export > div {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.audit-export p {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
 .audit-table-panel {
   overflow: hidden;
 }

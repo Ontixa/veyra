@@ -471,3 +471,52 @@ test("confirmed execution and rollback survive secondary read failures without r
   }
   page.off("request", count);
 });
+
+test("real daemon audit export matches the loaded API records without another request", async ({
+  page,
+}) => {
+  const tokenFile = process.env.VEYRA_E2E_TOKEN_FILE;
+  test.skip(
+    tokenFile === undefined,
+    "set VEYRA_E2E_TOKEN_FILE to a running synthetic local instance",
+  );
+  const token = (await readFile(tokenFile!, "utf8")).trim();
+  const apiUrl = process.env.VEYRA_E2E_API_URL ?? "http://127.0.0.1:7843/v1/";
+  // The existing real-flow suite seeds this isolated instance. This test only reads it.
+  await page.addInitScript(
+    ({ apiUrl, token }) => {
+      localStorage.setItem("veyra.apiUrl", apiUrl);
+      localStorage.setItem("veyra.token", token);
+    },
+    { apiUrl, token },
+  );
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().startsWith(apiUrl)) requests.push(request.method());
+  });
+  const responsePromise = page.waitForResponse((response) =>
+    response.url().includes("/audit/events/page?"),
+  );
+  await page.goto("/");
+  const rows = (await (await responsePromise).json()).items;
+  await page.getByRole("button", { name: /^Audit / }).click();
+  const button = page.getByRole("button", { name: "Export visible JSON" });
+  await expect(page.getByText("Chain verified")).toBeVisible();
+  if (rows.length === 0) {
+    await expect(button).toBeDisabled();
+    expect(requests.every((method) => method === "GET")).toBe(true);
+    return;
+  }
+  // Let the independent transaction-list/bundle reads finish before measuring export.
+  await page.waitForLoadState("networkidle");
+  const count = requests.length;
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    button.click(),
+  ]);
+  const content = await readFile((await download.path())!, "utf8");
+  expect(JSON.parse(content).events).toEqual(rows);
+  expect(content).not.toContain(token);
+  expect(requests).toHaveLength(count);
+  expect(requests.every((method) => method === "GET")).toBe(true);
+});
