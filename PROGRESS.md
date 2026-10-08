@@ -1951,3 +1951,11 @@ socket; the official Playwright headless-shell download was invalid, and the clo
 not reach the isolated shell preview port. Therefore local screenshot/browser execution is not
 claimed. Exact-head hosted Linux browser/screenshots, native Tauri, Windows MSVC, minimum Node,
 dependency/security/fuzz gates remain required before merge. No release or deployment was performed.
+
+Follow-up qualification: PR #77 head `202fbdfca67e3df1a98bdaad7c46dd97bbcac101` passed all eight
+hosted checks and all five browser tests, including both JSON download comparisons. Independent
+pixel review confirmed readable controls and scope text at 1440px and 390px, and caught one new
+status-copy pluralization issue. The status now uses **1 visible event** and plural **events** for
+other counts, with a focused assertion; this copy-only delta requires fresh exact-head CI.
+Screenshots from the earlier head remain layout evidence, not evidence for the updated text.
+Native WebView file-save behavior was not exercised by these Chromium tests.

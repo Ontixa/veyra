@@ -141,6 +141,7 @@ it("exports only matching displayed records with exact fields and honest loaded-
   fireEvent.click(button);
   const result = await exported();
   expect(result.events).toEqual([events[0]]);
+  expect(screen.getByText("Download requested: 1 visible event.")).toBeTruthy();
   expect(result.filter).toEqual({
     query: "COMMITTED",
     matching: "case_insensitive_substring",

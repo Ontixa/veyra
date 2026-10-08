@@ -1293,7 +1293,7 @@ function AuditView({
                 loadedAt,
               });
               setDownloadStatus(
-                `Download requested: ${events.length} visible events.`,
+                `Download requested: ${events.length} visible event${events.length === 1 ? "" : "s"}.`,
               );
             } catch {
               setDownloadStatus(
