@@ -18,6 +18,8 @@ import {
   saveBrowserConnection,
 } from "./connection";
 
+import { AUDIT_PAGE_SIZE, downloadAuditView } from "./audit-export";
+
 type View = "transactions" | "audit";
 type Theme = "light" | "dark";
 type BundleLoadState =
@@ -91,6 +93,13 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   const [intentContent, setIntentContent] = useState("Hello from Veyra.\n");
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [auditCursor, setAuditCursor] = useState<string | null>(null);
+  const [auditLoad, setAuditLoad] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
+  const [auditLoadedAt, setAuditLoadedAt] = useState<string | null>(null);
+  const auditPageInFlightRef = useRef(false);
+  const auditRefreshInFlightRef = useRef<number | null>(null);
+  const auditRetryInFlightRef = useRef<number | null>(null);
   const [audit, setAudit] = useState<AuditVerification | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -169,15 +178,29 @@ function ControlPlane({ client }: { client: VeyraClient }) {
 
   const refreshAudit = useCallback(async () => {
     const request = ++auditRequestRef.current;
+    auditRefreshInFlightRef.current = request;
+    auditPageInFlightRef.current = false;
     setAudit(null);
-    const [page, verification] = await Promise.all([
-      client.auditEventPage({ limit: 200 }),
-      client.verifyAudit(),
-    ]);
-    if (request !== auditRequestRef.current) return;
-    setEvents(page.items.slice().reverse());
-    setAuditCursor(page.next_cursor);
-    setAudit(verification);
+    setAuditLoad("loading");
+    try {
+      const [page, verification] = await Promise.all([
+        client.auditEventPage({ limit: AUDIT_PAGE_SIZE }),
+        client.verifyAudit(),
+      ]);
+      if (request !== auditRequestRef.current) return;
+      setEvents(page.items.slice().reverse());
+      setAuditCursor(page.next_cursor);
+      setAudit(verification);
+      setAuditLoadedAt(new Date().toISOString());
+      setAuditLoad("ready");
+    } catch (caught: unknown) {
+      if (request !== auditRequestRef.current) return;
+      setAuditLoad("error");
+      throw caught;
+    } finally {
+      if (auditRefreshInFlightRef.current === request)
+        auditRefreshInFlightRef.current = null;
+    }
   }, [client]);
 
   const loadMoreTransactions = useCallback(async () => {
@@ -210,17 +233,22 @@ function ControlPlane({ client }: { client: VeyraClient }) {
   const loadMoreAudit = useCallback(async () => {
     if (
       auditCursor === null ||
+      auditLoad !== "ready" ||
+      auditRefreshInFlightRef.current !== null ||
+      auditPageInFlightRef.current ||
       viewRefresh !== null ||
       viewRefreshInFlightRef.current !== null ||
       mutationInFlightRef.current
     )
       return;
     const request = auditRequestRef.current;
+    auditPageInFlightRef.current = true;
+    setAuditLoad("loading");
     setBusy("Loading older audit evidence");
     setError(null);
     try {
       const page = await client.auditEventPage({
-        limit: 200,
+        limit: AUDIT_PAGE_SIZE,
         cursor: auditCursor,
       });
       if (request !== auditRequestRef.current) return;
@@ -228,12 +256,20 @@ function ControlPlane({ client }: { client: VeyraClient }) {
         appendUnique(page.items.slice().reverse(), current),
       );
       setAuditCursor(page.next_cursor);
+      setAuditLoadedAt(new Date().toISOString());
+      setAuditLoad("ready");
     } catch (caught: unknown) {
-      if (request === auditRequestRef.current) setError(messageOf(caught));
+      if (request === auditRequestRef.current) {
+        setAuditLoad("error");
+        setError(messageOf(caught));
+      }
     } finally {
-      if (request === auditRequestRef.current) setBusy(null);
+      if (request === auditRequestRef.current) {
+        auditPageInFlightRef.current = false;
+        setBusy(null);
+      }
     }
-  }, [auditCursor, client, viewRefresh]);
+  }, [auditCursor, auditLoad, client, viewRefresh]);
 
   const loadMoreBundleEvents = useCallback(async () => {
     if (bundle === null || bundle.events_next_cursor === null) return;
@@ -521,7 +557,11 @@ function ControlPlane({ client }: { client: VeyraClient }) {
               {auditCursor !== null && (
                 <button
                   className="pagination-button"
-                  disabled={busy !== null || viewRefresh !== null}
+                  disabled={
+                    busy !== null ||
+                    viewRefresh !== null ||
+                    auditLoad !== "ready"
+                  }
                   onClick={() => void loadMoreAudit()}
                 >
                   Load older evidence
@@ -579,7 +619,28 @@ function ControlPlane({ client }: { client: VeyraClient }) {
           )}
           {busy !== null && <LoadingBar label={busy} />}
           {view === "audit" ? (
-            <AuditView events={filteredEvents} verification={audit} />
+            <AuditView
+              events={filteredEvents}
+              verification={audit}
+              loadedEvents={events}
+              query={query}
+              hasMore={auditCursor !== null}
+              loadedAt={auditLoadedAt}
+              loadState={auditLoad}
+              onRetry={() => {
+                if (auditRetryInFlightRef.current === auditRequestRef.current)
+                  return;
+                const request = auditRequestRef.current + 1;
+                auditRetryInFlightRef.current = request;
+                setError(null);
+                void refreshAudit()
+                  .catch((caught: unknown) => setError(messageOf(caught)))
+                  .finally(() => {
+                    if (auditRetryInFlightRef.current === request)
+                      auditRetryInFlightRef.current = null;
+                  });
+              }}
+            />
           ) : selectedId === null ? (
             <EmptyState onCreate={() => void seedIntent()} />
           ) : "error" in bundleLoad && bundleLoad.error !== null ? (
@@ -1138,10 +1199,24 @@ function Timeline({ events }: { events: AuditEvent[] }) {
 function AuditView({
   events,
   verification,
+  loadedEvents,
+  query,
+  hasMore,
+  loadedAt,
+  loadState,
+  onRetry,
 }: {
   events: AuditEvent[];
   verification: AuditVerification | null;
+  loadedEvents: AuditEvent[];
+  query: string;
+  hasMore: boolean;
+  loadedAt: string | null;
+  loadState: "loading" | "ready" | "error";
+  onRetry: () => void;
 }) {
+  const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  useEffect(() => setDownloadStatus(null), [events, query, loadState]);
   const pending = verification === null;
   const valid = verification?.valid === true;
   return (
@@ -1166,6 +1241,69 @@ function AuditView({
                 : "Integrity failure"
           }
         />
+      </section>
+      <section className="audit-export" aria-label="Export audit view">
+        <div>
+          <strong>
+            {events.length} visible of {loadedEvents.length} loaded events
+          </strong>
+          <p>
+            {hasMore
+              ? "Older events have not been loaded. "
+              : "Only the loaded window is included. "}
+            Export preserves API records and the current search, without
+            additional redaction. It is not a complete archive, verified chain,
+            or authenticated anchor.
+          </p>
+          {loadState === "loading" && (
+            <p role="status">
+              Loading audit evidence… Export waits for the current read.
+            </p>
+          )}
+          {loadState === "error" && (
+            <p role="status">
+              Audit read failed. Retry before exporting this view.
+            </p>
+          )}
+          {downloadStatus !== null && <p role="status">{downloadStatus}</p>}
+        </div>
+        {loadState === "error" && (
+          <button className="secondary-button" onClick={onRetry}>
+            Retry audit
+          </button>
+        )}
+        <button
+          className="secondary-button"
+          disabled={
+            loadState !== "ready" || loadedAt === null || events.length === 0
+          }
+          onClick={() => {
+            if (
+              loadState !== "ready" ||
+              loadedAt === null ||
+              events.length === 0
+            )
+              return;
+            try {
+              downloadAuditView({
+                events,
+                loadedEvents,
+                query,
+                hasMore,
+                loadedAt,
+              });
+              setDownloadStatus(
+                `Download requested: ${events.length} visible events.`,
+              );
+            } catch {
+              setDownloadStatus(
+                "Could not start the download. Try exporting again.",
+              );
+            }
+          }}
+        >
+          Export visible JSON
+        </button>
       </section>
       <section className="panel audit-table-panel">
         <PanelHeading

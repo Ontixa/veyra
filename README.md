@@ -220,6 +220,23 @@ Veyra reports an unconfirmed outcome and requires a current detail read before s
 actions; **Retry transaction** performs that read. Even an API error can follow a durable state
 transition. No recovery control replays a POST.
 
+In **Audit**, **Export visible JSON** downloads only the events currently visible after the local
+search, in the table's newest-first order. It never fetches extra pages or uploads data. The
+`veyra.desktop-audit-view/v1` file preserves every returned event field, including full IDs, hashes,
+and payloads, and records the exact search, matching fields, page size, loaded/visible counts and
+sequence bounds, last successful page-load time, and whether older pages remain. The timestamped
+filename contains no search text. Empty searches with no matching events and loading/failed audit
+reads cannot be exported; **Retry audit** refreshes the audit with GETs only.
+
+This file is a local view snapshot, not a complete audit archive, independently verified chain, or
+HMAC-authenticated audit anchor. Separate page reads and the daemon's integrity check are not an
+atomic snapshot, and a chain badge does not certify a downloaded subset. Records retain the API's
+existing redaction; the desktop applies no extra redaction, so review payloads and search text
+before sharing the file. An integrity-failed view can be exported for inspection and still carries
+no verification claim. Use the [CLI/API audit export and audit-anchor commands](docs/api-cli-reference.md)
+for their distinct documented contracts. Downloads use the browser/webview's normal file handling;
+the UI reports a download request, not confirmation that a file was saved.
+
 ## OpenAI-compatible planning
 
 The offline fixture planner is the default. To enable a Responses-compatible provider, set the key

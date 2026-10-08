@@ -1891,3 +1891,63 @@ Local limits: `bash ./scripts/verify.sh`, `corepack pnpm oss:check`, and
 `corepack pnpm package:check` were attempted and blocked by absent Cargo. Rust 1.96, cargo-deny,
 Rust package inspection, evals, native Tauri, Windows, minimum-Node execution, real-daemon E2E,
 and screenshot review remain required on the exact hosted candidate before merge.
+
+## 2026-10-08 — Export the displayed desktop audit view
+
+- Confirmed on `0b74231657bfa1a31dbdb9f19bb2f69e320c7594` that the desktop showed shortened
+  audit fields and local search/pagination but had no visible-record export. The existing CLI/API
+  export and authenticated anchors have separate contracts and are unchanged.
+- Added a user-triggered local JSON download containing exact displayed API event objects in
+  newest-first order, the current case-insensitive search and fields, loaded/visible counts and
+  sequence bounds, last successful read time, page size, and an older-pages flag. The additive
+  `veyra.desktop-audit-view/v1` artifact is a desktop view format, not a wire-protocol, journal,
+  CLI, SDK, or migration change. No new dependency, network upload, extra export request, or
+  client redaction was added. The UI and README explicitly reject completeness, independent
+  verification, and authenticated-anchor claims for the file.
+- Loading, failed, and empty audit views cannot export. GET-only audit retry and pagination
+  coalesce repeated requests; generation ownership prevents stale reads from replacing current
+  records or metadata. Replacement and pagination failures must recover a ready audit window before
+  older-page reads can proceed. Independent review exposed an obsolete retry blocking a newer failed
+  generation and a retained cursor reopening a failed window; generation-owned retry coalescing and
+  the ready-state pagination guard now have three additional regressions. Added 16 focused desktop cases covering exact payloads/hashes/IDs,
+  redaction preservation, empty/no-match/integrity-failure cases, download failures and URL cleanup,
+  filenames, filter changes, partial windows, pending/repeated requests, and superseded success/failure.
+- Added synthetic browser coverage for keyboard downloads, exact JSON/metadata, repeat/filter and
+  navigation flows, and 1440px/390px screenshots. Appended a real-daemon browser export comparison
+  after the existing synthetic transaction flow so it inspects that flow's records without new
+  mutations. Both tests are discovered and type-checked; browser execution remains a hosted gate.
+
+Passed locally on Linux with Node 24.19.0, pnpm 11.20.0, and Rust 1.96.0:
+
+```text
+corepack pnpm install --frozen-lockfile
+corepack pnpm format
+corepack pnpm check
+corepack pnpm lint
+corepack pnpm test
+corepack pnpm build
+corepack pnpm oss:check
+corepack pnpm package:check
+corepack pnpm release:check
+corepack pnpm audit --audit-level high
+corepack pnpm --filter @veyra/desktop exec playwright test --list
+cargo build --locked -p veyra-server
+cargo test --workspace --exclude veyra-desktop --all-targets --all-features --locked
+cargo clippy --workspace --exclude veyra-desktop --all-targets --all-features --locked -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --exclude veyra-desktop --all-features --no-deps --locked
+git diff --check
+```
+
+Results: 108 desktop tests, 8 SDK tests, 3 schema tests, 36 release-control tests (six existing
+PowerShell-only skips), and 157 non-Tauri Rust tests passed. OSS checks passed 523 assertions;
+package checks covered seven Rust crates, two npm packages, and 70 publication-plan assertions.
+The dependency audit reported no known vulnerabilities. An additional isolated real-daemon check
+seeded synthetic planning records only (no approval, execution, or rollback), exported all 11 loaded
+API records exactly, excluded its bearer, and confirmed the live journal verification remained valid.
+
+Local limits: the full `bash scripts/verify.sh` gate was attempted and stopped because the container
+lacks `glib-2.0` required for native Tauri. Shell-launched Chromium could not create its required Unix
+socket; the official Playwright headless-shell download was invalid, and the cloud browser could
+not reach the isolated shell preview port. Therefore local screenshot/browser execution is not
+claimed. Exact-head hosted Linux browser/screenshots, native Tauri, Windows MSVC, minimum Node,
+dependency/security/fuzz gates remain required before merge. No release or deployment was performed.
