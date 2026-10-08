@@ -37,6 +37,11 @@ query/fragment-bearing base URLs and redirects; it also bounds request/response 
 `VeyraApiError` values with stable `status` and `code`; their terminal-safe message is stripped of
 control characters and capped at 1,024 Unicode characters.
 
+For a malformed HTTP error envelope, the SDK preserves the HTTP status and accepts `code` only
+when it is a string matching `[a-z0-9_]{1,64}`, otherwise using `api_error`. A missing or non-string
+message uses `Veyra API request failed`; valid string messages keep the same redaction and display
+limits. This fallback does not retry the request or turn an HTTP failure into success.
+
 The repository's [trusted-controller lifecycle example](https://github.com/Ontixa/veyra/tree/main/packages/sdk-typescript/examples)
 uses the real API to demonstrate denial, exact operator approval, verified filesystem
 execution, rollback and audit. It includes a real-daemon acceptance test and keeps the

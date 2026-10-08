@@ -29,37 +29,175 @@ describe("VeyraClient", () => {
     expect(init?.credentials).toBe("omit");
   });
 
-  it("returns safe typed API errors without retaining the raw response", async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
-      Response.json(
-        {
-          error: {
-            code: "insufficient_authority",
-            message: `capability missing ${TOKEN}\n\u001b[31m`,
+  it.each([
+    {
+      inputCode: "insufficient_authority",
+      expectedCode: "insufficient_authority",
+    },
+    { inputCode: 403, expectedCode: "api_error" },
+  ])(
+    "returns safe typed API errors for code $inputCode",
+    async ({ inputCode, expectedCode }) => {
+      const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
+        Response.json(
+          {
+            error: {
+              code: inputCode,
+              message: `capability missing ${TOKEN}\n\u001b[31m${"🙂".repeat(1_100)}`,
+            },
           },
+          { status: 403 },
+        ),
+      );
+      const client = new VeyraClient({
+        baseUrl: "http://localhost:7843/v1/",
+        token: TOKEN,
+        fetch,
+      });
+
+      const error = await client
+        .runTransaction("tx")
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(VeyraApiError);
+      if (!(error instanceof VeyraApiError))
+        throw new Error("expected API error");
+      expect(error).toMatchObject({
+        status: 403,
+        code: expectedCode,
+      });
+      expect(error.message).toContain("[REDACTED]");
+      expect(error.message).not.toContain(TOKEN);
+      expect(error.message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+      expect(Array.from(error.message)).toHaveLength(1_024);
+      expect(fetch).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each<{
+    label: string;
+    body: unknown;
+    code?: string;
+    message?: string;
+  }>([
+    { label: "null envelope", body: null },
+    { label: "string envelope", body: "unavailable" },
+    { label: "number envelope", body: 500 },
+    { label: "boolean envelope", body: false },
+    { label: "array envelope", body: [{ error: { code: "ignored" } }] },
+    { label: "missing error", body: {} },
+    { label: "null error", body: { error: null } },
+    { label: "string error", body: { error: "unavailable" } },
+    { label: "number error", body: { error: 500 } },
+    { label: "boolean error", body: { error: false } },
+    { label: "array error", body: { error: ["unavailable"] } },
+    { label: "missing fields", body: { error: {} } },
+    { label: "null code", body: { error: { code: null } } },
+    { label: "numeric code", body: { error: { code: 500 } } },
+    { label: "boolean code", body: { error: { code: true } } },
+    { label: "array code", body: { error: { code: ["internal_error"] } } },
+    { label: "object code", body: { error: { code: {} } } },
+    {
+      label: "invalid string code",
+      body: { error: { code: "Internal-Error" } },
+    },
+    { label: "empty code", body: { error: { code: "" } } },
+    { label: "oversized code", body: { error: { code: "a".repeat(65) } } },
+    {
+      label: "null message",
+      body: { error: { code: "internal_error", message: null } },
+      code: "internal_error",
+    },
+    {
+      label: "numeric message",
+      body: { error: { code: "internal_error", message: 500 } },
+      code: "internal_error",
+    },
+    {
+      label: "boolean message",
+      body: { error: { code: "internal_error", message: false } },
+      code: "internal_error",
+    },
+    {
+      label: "array message",
+      body: { error: { code: "internal_error", message: ["unavailable"] } },
+      code: "internal_error",
+    },
+    {
+      label: "object message",
+      body: {
+        error: { code: "internal_error", message: { detail: "unavailable" } },
+      },
+      code: "internal_error",
+    },
+    {
+      label: "missing message",
+      body: { error: { code: "internal_error" } },
+      code: "internal_error",
+    },
+    {
+      label: "valid message with invalid code",
+      body: {
+        error: { code: 500, message: "Daemon could not finish the read" },
+      },
+      message: "Daemon could not finish the read",
+    },
+    {
+      label: "valid fields",
+      body: {
+        error: {
+          code: "internal_error",
+          message: "Daemon could not finish the read",
         },
-        { status: 403 },
-      ),
-    );
+      },
+      code: "internal_error",
+      message: "Daemon could not finish the read",
+    },
+    {
+      label: "valid boundary code and empty message",
+      body: { error: { code: "a".repeat(64), message: "" } },
+      code: "a".repeat(64),
+      message: "",
+    },
+  ])("preserves HTTP errors for $label", async ({ body, code, message }) => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(Response.json(body, { status: 500 }));
     const client = new VeyraClient({
-      baseUrl: "http://localhost:7843/v1/",
+      baseUrl: "http://127.0.0.1:7843/v1/",
       token: TOKEN,
       fetch,
     });
 
-    const error = await client
-      .runTransaction("tx")
-      .catch((caught: unknown) => caught);
+    const error = await client.health().catch((caught: unknown) => caught);
+
     expect(error).toBeInstanceOf(VeyraApiError);
-    if (!(error instanceof VeyraApiError))
-      throw new Error("expected API error");
     expect(error).toMatchObject({
-      status: 403,
-      code: "insufficient_authority",
+      status: 500,
+      code: code ?? "api_error",
+      message: message ?? "Veyra API request failed",
     });
-    expect(error.message).toContain("[REDACTED]");
-    expect(error.message).not.toContain(TOKEN);
-    expect(error.message).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a non-JSON HTTP failure with fallback diagnostics", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(new Response("Service unavailable", { status: 503 }));
+    const client = new VeyraClient({
+      baseUrl: "http://127.0.0.1:7843/v1/",
+      token: TOKEN,
+      fetch,
+    });
+
+    const error = await client.health().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(VeyraApiError);
+    expect(error).toMatchObject({
+      status: 503,
+      code: "api_error",
+      message: "Veyra API request failed",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("rejects non-loopback authority endpoints", () => {
